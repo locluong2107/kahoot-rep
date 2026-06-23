@@ -6,6 +6,29 @@
 <meta name="theme-color" content="#00144A" />
 <title>Join — Are You Smarter Than a Chatbot?</title>
 <link rel="stylesheet" href="/styles.css" />
+<style>
+  /* Word cloud submission area */
+  .word-list {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    min-height: 8px;
+    margin-top: 4px;
+  }
+  .word-list .my-word {
+    background: var(--blue-2);
+    color: var(--blue-7);
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .word-done-row { display: flex; gap: 8px; }
+  .word-done-row button { flex: 1; }
+  .word-counter {
+    font-size: 0.85rem;
+    color: var(--grey-7);
+    margin-top: 4px;
+  }
+</style>
 </head>
 <body>
 <div class="center-stage">
@@ -42,10 +65,18 @@
         <h1 style="font-size: 1.4rem;" id="questionPrompt">Pick your answer</h1>
       </div>
       <div id="tileGrid" class="tile-grid"></div>
+
+      <!-- Word cloud submission UI -->
       <div id="wordcloudInput" class="card col hidden">
-        <input id="wordInput" type="text" maxlength="40" placeholder="One word…" />
-        <button id="sendWordBtn" class="btn-primary">Send</button>
+        <input id="wordInput" type="text" maxlength="40" placeholder="Type a word and press Add…" />
+        <div class="word-done-row">
+          <button id="sendWordBtn" class="btn-secondary">+ Add</button>
+          <button id="wordDoneBtn" class="btn-primary">Done ✓</button>
+        </div>
+        <div class="word-counter" id="wordCounter">0 / 20 words submitted</div>
+        <div class="word-list" id="myWordList"></div>
       </div>
+
       <div class="row between" style="margin-top:14px; color:white;">
         <span class="players-pill" id="answerStatus">Tap an answer</span>
         <span class="timer-pill" id="playerTimer">—</span>
@@ -94,6 +125,8 @@ const socket = io();
 let myName = '';
 let currentQuestion = null;
 let timerInterval = null;
+let myWords = [];      // word-cloud submissions so far this question
+let wordDone = false;  // whether the player pressed Done
 
 // Preserve PIN from URL (?pin=123456) so a QR code can drop you here
 const params = new URLSearchParams(location.search);
@@ -119,7 +152,7 @@ socket.on('question:start', ({ question, index, total }) => {
   Sound.play('questionStart');
   currentQuestion = question;
   $('questionPrompt').textContent = `Q${index + 1}/${total}`;
-  $('answerStatus').textContent = 'Tap an answer';
+  $('answerStatus').textContent = question.type === 'wordcloud' ? 'Add words, then press Done' : 'Tap an answer';
   $('wordcloudInput').classList.add('hidden');
   $('tileGrid').classList.remove('hidden');
 
@@ -129,6 +162,13 @@ socket.on('question:start', ({ question, index, total }) => {
     $('wordInput').value = '';
     $('wordInput').disabled = false;
     $('sendWordBtn').disabled = false;
+    $('wordDoneBtn').disabled = false;
+    $('wordDoneBtn').textContent = 'Done ✓';
+    $('myWordList').innerHTML = '';
+    myWords = [];
+    wordDone = false;
+    updateWordCounter();
+    $('wordInput').focus();
   } else {
     renderTiles(question.options);
   }
@@ -155,13 +195,41 @@ function renderTiles(options) {
   });
 }
 
-$('sendWordBtn').addEventListener('click', () => {
+// ----- word cloud submission -----
+function updateWordCounter() {
+  $('wordCounter').textContent = `${myWords.length} / 20 words submitted`;
+}
+function addMyWord() {
+  if (wordDone) return;
   const v = $('wordInput').value.trim();
-  if (!v) return toast('Type a word');
+  if (!v) return;
+  if (myWords.length >= 20) { toast('You hit the 20-word limit'); return; }
   socket.emit('player:answer', { text: v });
+  myWords.push(v);
+  const chip = document.createElement('span');
+  chip.className = 'my-word';
+  chip.textContent = v;
+  $('myWordList').appendChild(chip);
+  $('wordInput').value = '';
+  $('wordInput').focus();
+  updateWordCounter();
+  Sound.play('click');
+}
+$('sendWordBtn').addEventListener('click', addMyWord);
+$('wordInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); addMyWord(); }
+});
+$('wordDoneBtn').addEventListener('click', () => {
+  if (wordDone) return;
+  wordDone = true;
+  socket.emit('player:wordDone');
   $('wordInput').disabled = true;
   $('sendWordBtn').disabled = true;
-  $('answerStatus').textContent = 'Sent ✓';
+  $('wordDoneBtn').disabled = true;
+  $('wordDoneBtn').textContent = 'Submitted ✓';
+  $('answerStatus').textContent = myWords.length
+    ? `Sent ${myWords.length} word${myWords.length === 1 ? '' : 's'} ✓`
+    : 'Submitted (no words)';
 });
 
 function startTimer(seconds) {
@@ -175,7 +243,7 @@ function startTimer(seconds) {
   }, 1000);
 }
 
-socket.on('player:result', ({ answered, isCorrect, score, delta, type }) => {
+socket.on('player:result', ({ answered, isCorrect, score, delta, type, isScored }) => {
   clearInterval(timerInterval);
   let big = '⏳', msg = '';
   if (type === 'poll' || type === 'wordcloud') {
@@ -188,17 +256,39 @@ socket.on('player:result', ({ answered, isCorrect, score, delta, type }) => {
   }
   $('resultBig').textContent = big;
   $('resultMsg').textContent = msg;
-  $('resultScore').textContent = `Score: ${score}`;
+  // Hide score on unscored questions (polls, word cloud)
+  if (isScored) {
+    $('resultScore').textContent = `Score: ${score}`;
+    $('resultScore').classList.remove('hidden');
+  } else {
+    $('resultScore').textContent = '';
+    $('resultScore').classList.add('hidden');
+  }
   show('result');
 });
 
 socket.on('player:rank', ({ rank, total, score }) => {
-  $('resultRank').textContent = `Rank ${rank} of ${total}`;
+  // Only show rank on the result screen if the most recent question was scored.
+  // (The host sends rank after every question, but it's only meaningful for scored ones.)
+  const isPollOrCloud = currentQuestion && (currentQuestion.type === 'poll' || currentQuestion.type === 'wordcloud');
+  if (isPollOrCloud) {
+    $('resultRank').textContent = '';
+  } else {
+    $('resultRank').textContent = `Rank ${rank} of ${total}`;
+  }
+  // Final-podium values are always shown
   $('finalRank').textContent = `Final rank: ${rank} of ${total}`;
   $('finalScore').textContent = `Score: ${score}`;
 });
 
 socket.on('game:finished', () => { Sound.play('podium'); show('finished'); });
+
+// Session reset — host started a fresh game on the same socket. Drop the player back to join.
+socket.on('session:reset', () => {
+  toast('Host started a new session');
+  setTimeout(() => location.reload(), 1200);
+});
+
 socket.on('game:ended', ({ reason }) => {
   toast(reason || 'Game ended');
   setTimeout(() => location.reload(), 1500);

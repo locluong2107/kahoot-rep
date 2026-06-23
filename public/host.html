@@ -51,8 +51,7 @@
   }
   .controls { display:flex; gap:12px; justify-content:center; padding: 16px; flex-wrap: wrap; }
   .question-header { color:white; font-size: 1.1rem; opacity: 0.8; text-align:center; }
-  .tile-result { position: relative; }
-  .tile-result .check { position:absolute; top:10px; right:14px; font-size:1.6rem; }
+
   .leaderboard { width: 100%; max-width: 700px; display:flex; flex-direction:column; gap:10px; }
   .lb-row {
     display:flex; align-items:center; justify-content:space-between;
@@ -63,6 +62,63 @@
   .lb-row .rank { width: 40px; font-weight:800; color: var(--mango-4); }
   .lb-row.first { background: linear-gradient(90deg, rgba(255,201,51,0.25), rgba(255,201,51,0.05)); border-color: var(--mango-4); }
   #quizPicker { max-width: 540px; }
+
+  /* live tally bars overlaid on the question screen for polls */
+  .live-tally { width: 100%; margin-top: 18px; }
+  .live-tally .bar-row { margin: 12px 0; }
+
+  /* reveal-screen styling: highlight correct tiles, dim wrong ones */
+  .reveal-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; width: 100%; }
+  .reveal-tile {
+    position: relative;
+    min-height: 110px;
+    border-radius: var(--radius);
+    padding: 18px;
+    color: white;
+    font-weight: 700;
+    font-size: 1.1rem;
+    text-align: left;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: opacity 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
+  }
+  .reveal-tile.a { background: var(--tile-a); }
+  .reveal-tile.b { background: var(--tile-b); }
+  .reveal-tile.c { background: var(--tile-c); }
+  .reveal-tile.d { background: var(--tile-d); }
+  .reveal-tile.dim { opacity: 0.35; filter: grayscale(0.4); }
+  .reveal-tile.correct {
+    outline: 5px solid #FFC933; /* mango-4 highlight */
+    transform: scale(1.03);
+    box-shadow: 0 0 0 8px rgba(255, 201, 51, 0.25), var(--shadow);
+    animation: correctPulse 1.2s ease infinite;
+  }
+  @keyframes correctPulse {
+    0%, 100% { box-shadow: 0 0 0 8px rgba(255, 201, 51, 0.25), var(--shadow); }
+    50%      { box-shadow: 0 0 0 14px rgba(255, 201, 51, 0.15), var(--shadow); }
+  }
+  .reveal-tile .top { display: flex; align-items: center; gap: 12px; }
+  .reveal-tile .shape {
+    width: 28px; height: 28px; background: rgba(255,255,255,0.9); flex: 0 0 28px;
+  }
+  .reveal-tile.a .shape { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  .reveal-tile.b .shape { border-radius: 50%; }
+  .reveal-tile.c .shape { clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); }
+  .reveal-tile.d .shape { border-radius: 6px; }
+  .reveal-tile .stat {
+    margin-top: 12px;
+    display: flex; align-items: baseline; gap: 12px;
+    font-weight: 800;
+  }
+  .reveal-tile .pct { font-size: 1.8rem; }
+  .reveal-tile .num { opacity: 0.85; font-size: 0.95rem; font-weight: 600; }
+  .reveal-tile .correct-badge {
+    position: absolute; top: 10px; right: 12px;
+    background: #FFC933; color: var(--mango-7);
+    padding: 3px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 800;
+  }
 </style>
 </head>
 <body>
@@ -117,6 +173,8 @@
       <div class="huge-question" id="qText">…</div>
       <div id="qTiles" class="tile-grid"></div>
       <div id="qWordcloud" class="wordcloud hidden"></div>
+      <!-- Real-time tally bars (shown for polls during the question) -->
+      <div id="liveTally" class="live-tally hidden"></div>
       <div class="row" style="margin-top:14px;">
         <span class="players-pill" id="answeredCount">0 / 0 answered</span>
       </div>
@@ -147,6 +205,7 @@
     <button id="nextBtn" class="btn-primary hidden">Next ▶</button>
     <button id="skipBtn" class="btn-ghost hidden">Skip timer</button>
     <button id="leaderboardBtn" class="btn-secondary hidden">Show leaderboard</button>
+    <button id="newSessionBtn" class="btn-secondary hidden">New session</button>
     <button id="endBtn" class="btn-danger hidden">End game</button>
   </div>
 </div>
@@ -166,7 +225,8 @@ let currentPin = null;
 let currentQuestion = null;
 let timerInterval = null;
 let lastReveal = null;
-let publicBase = '';  // overrides the auto-detected base for QR/URL
+let publicBase = '';
+let quizList = [];
 
 // ----- sound controls -----
 function updateSoundLabels() {
@@ -216,10 +276,10 @@ updateSoundLabels();
 
 async function loadQuizzes() {
   const res = await fetch('/api/quizzes');
-  const list = await res.json();
+  quizList = await res.json();
   const sel = $('quizSelect');
   sel.innerHTML = '';
-  list.forEach(q => {
+  quizList.forEach(q => {
     const opt = document.createElement('option');
     opt.value = q.id;
     opt.textContent = `${q.title} (${q.questions.length} questions)`;
@@ -233,26 +293,48 @@ $('createBtn').addEventListener('click', () => {
   const quizId = $('quizSelect').value;
   socket.emit('host:create', { quizId }, (res) => {
     if (res.error) return alert(res.error);
-    currentPin = res.pin;
-    $('pinDisplay').textContent = res.pin;
-    $('lobbyTitle').textContent = res.quiz.title;
-    $('quizTitle').textContent = res.quiz.title;
-    updateJoinUI();
-    $('nextBtn').classList.remove('hidden');
-    $('endBtn').classList.remove('hidden');
-    $('nextBtn').textContent = 'Start ▶';
-    show('lobby');
+    enterLobby(res);
     Sound.startMusic();
   });
 });
 
-$('nextBtn').addEventListener('click', () => {
-  socket.emit('host:next');
-});
+function enterLobby(res) {
+  currentPin = res.pin;
+  $('pinDisplay').textContent = res.pin;
+  $('lobbyTitle').textContent = res.quiz.title;
+  $('quizTitle').textContent = res.quiz.title;
+  $('playersList').innerHTML = '';
+  updateJoinUI();
+  $('nextBtn').classList.remove('hidden');
+  $('endBtn').classList.remove('hidden');
+  $('newSessionBtn').classList.add('hidden');
+  $('nextBtn').textContent = 'Start ▶';
+  show('lobby');
+}
+
+$('nextBtn').addEventListener('click', () => socket.emit('host:next'));
 $('skipBtn').addEventListener('click', () => socket.emit('host:skip'));
 $('leaderboardBtn').addEventListener('click', () => socket.emit('host:showLeaderboard'));
 $('endBtn').addEventListener('click', () => {
   if (confirm('End the game for everyone?')) socket.emit('host:end');
+});
+
+// "New session" — opens a quiz picker overlay so the host can pick the same or a different quiz.
+$('newSessionBtn').addEventListener('click', () => {
+  const titles = quizList.map((q, i) => `${i + 1}. ${q.title} (${q.questions.length}q)`).join('\n');
+  const def = quizList.findIndex(q => q.title === $('quizTitle').textContent);
+  const pick = prompt(
+    `Start a new session with which quiz? Enter the number:\n\n${titles}`,
+    String((def >= 0 ? def : 0) + 1)
+  );
+  if (!pick) return;
+  const idx = parseInt(pick, 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= quizList.length) return alert('Invalid pick.');
+  socket.emit('host:newSession', { quizId: quizList[idx].id }, (res) => {
+    if (res.error) return alert(res.error);
+    enterLobby(res);
+    Sound.startMusic();
+  });
 });
 
 socket.on('state', (s) => {
@@ -282,6 +364,8 @@ socket.on('question:start', ({ question, index, total }) => {
   $('qTiles').innerHTML = '';
   $('qWordcloud').classList.add('hidden');
   $('qWordcloud').innerHTML = '';
+  $('liveTally').classList.add('hidden');
+  $('liveTally').innerHTML = '';
 
   if (question.type === 'wordcloud') {
     $('qWordcloud').classList.remove('hidden');
@@ -299,6 +383,11 @@ socket.on('question:start', ({ question, index, total }) => {
       t.innerHTML = `<span class="shape"></span><span>${escape(o.text)}</span>`;
       $('qTiles').appendChild(t);
     });
+    // For polls, show LIVE tally bars under the tiles right away.
+    if (question.type === 'poll') {
+      $('liveTally').classList.remove('hidden');
+      renderLiveTally(question.options.map(o => o.text), {}, 0);
+    }
   }
   $('answeredCount').textContent = `0 / ${$('playerCount').textContent.split(' ')[0]} answered`;
   startTimer(question.time);
@@ -314,6 +403,59 @@ socket.on('answers:count', ({ answered, total }) => {
   $('answeredCount').textContent = `${answered} / ${total} answered`;
 });
 
+// ----- Live tallies during the question -----
+socket.on('live:tally', ({ type, tally, totalPlayers, answered }) => {
+  if (!currentQuestion) return;
+  if (currentQuestion.type !== type) return;
+  // Show live tally only for polls (per request).
+  if (type === 'poll') {
+    $('liveTally').classList.remove('hidden');
+    renderLiveTally(currentQuestion.options.map(o => o.text), tally, answered || 0);
+  }
+});
+
+socket.on('live:wordcloud', ({ words, totalPlayers, donePlayers }) => {
+  if (!currentQuestion || currentQuestion.type !== 'wordcloud') return;
+  const cloud = $('qWordcloud');
+  cloud.innerHTML = '';
+  if (!words.length) {
+    const ph = document.createElement('div');
+    ph.className = 'muted';
+    ph.style.color = 'var(--blue-4)';
+    ph.textContent = 'Waiting for words…';
+    cloud.appendChild(ph);
+    return;
+  }
+  const max = Math.max(1, ...words.map(w => w.count));
+  // sort by frequency descending for a more "cloud-like" feel
+  words.slice().sort((a,b) => b.count - a.count).forEach(({ word, count }) => {
+    const el = document.createElement('span');
+    const size = Math.min(4, Math.max(1, Math.ceil((count / max) * 4)));
+    el.className = `word size-${size}`;
+    el.textContent = count > 1 ? `${word} ×${count}` : word;
+    cloud.appendChild(el);
+  });
+});
+
+function renderLiveTally(optionTexts, tally, answered) {
+  const el = $('liveTally');
+  el.innerHTML = '';
+  const total = Object.values(tally).reduce((a,b) => a+b, 0);
+  optionTexts.forEach((text, i) => {
+    const count = tally[i] || 0;
+    const pct = total > 0 ? (count / total) * 100 : 0;
+    const color = ['var(--tile-a)','var(--tile-b)','var(--tile-c)','var(--tile-d)'][i];
+    const row = document.createElement('div');
+    row.className = 'bar-row';
+    row.innerHTML = `
+      <div class="label">${escape(text)}</div>
+      <div class="bar"><div style="width:${pct}%; background:${color};"></div></div>
+      <div class="count">${Math.round(pct)}%</div>
+    `;
+    el.appendChild(row);
+  });
+}
+
 socket.on('question:reveal', (r) => {
   lastReveal = r;
   clearInterval(timerInterval);
@@ -322,7 +464,7 @@ socket.on('question:reveal', (r) => {
   $('skipBtn').classList.add('hidden');
   $('nextBtn').classList.remove('hidden');
   $('nextBtn').textContent = 'Next ▶';
-  $('leaderboardBtn').classList.remove('hidden');
+  $('leaderboardBtn').classList.toggle('hidden', !r.isScored);
 
   $('revealHeader').textContent = `${r.totalAnswers} / ${r.totalPlayers} answered`;
   $('revealText').textContent = r.text;
@@ -333,36 +475,42 @@ socket.on('question:reveal', (r) => {
   if (r.type === 'wordcloud') {
     const cloud = document.createElement('div');
     cloud.className = 'wordcloud';
-    // size words by frequency
-    const counts = {};
-    r.words.forEach(w => counts[w.word.toLowerCase()] = (counts[w.word.toLowerCase()] || 0) + 1);
-    const max = Math.max(1, ...Object.values(counts));
-    Object.entries(counts).forEach(([word, n]) => {
+    const max = Math.max(1, ...r.words.map(w => w.count));
+    r.words.slice().sort((a,b) => b.count - a.count).forEach(({ word, count }) => {
       const el = document.createElement('span');
-      const size = Math.min(4, Math.max(1, Math.ceil((n / max) * 4)));
+      const size = Math.min(4, Math.max(1, Math.ceil((count / max) * 4)));
       el.className = `word size-${size}`;
-      el.textContent = word;
+      el.textContent = count > 1 ? `${word} ×${count}` : word;
       cloud.appendChild(el);
     });
     body.appendChild(cloud);
   } else {
+    // Tile-style reveal with correct-answer HIGHLIGHTING (not a tick).
+    // Polls show percentages; quiz/TF show count + percentage.
     const letters = ['a','b','c','d'];
-    const max = Math.max(1, ...Object.values(r.tally));
     const total = Object.values(r.tally).reduce((a,b) => a+b, 0) || 1;
+    const grid = document.createElement('div');
+    grid.className = 'reveal-tiles';
     r.options.forEach((text, i) => {
-      const row = document.createElement('div');
-      row.className = 'bar-row';
-      const correct = r.correctIndex === i;
-      const color = ['var(--tile-a)','var(--tile-b)','var(--tile-c)','var(--tile-d)'][i];
-      const pct = (r.tally[i] / total) * 100;
-      const widthOfMax = (r.tally[i] / max) * 100;
-      row.innerHTML = `
-        <div class="label">${escape(text)} ${correct ? '✅' : (r.correctIndex !== null ? '' : '')}</div>
-        <div class="bar"><div style="width:${widthOfMax}%; background:${color};"></div></div>
-        <div class="count">${r.tally[i]}</div>
+      const isCorrect = r.correctIndex === i;
+      const hasCorrect = r.correctIndex !== null && r.correctIndex !== undefined;
+      const tile = document.createElement('div');
+      const dim = hasCorrect && !isCorrect ? ' dim' : '';
+      const correct = isCorrect ? ' correct' : '';
+      tile.className = `reveal-tile ${letters[i]}${dim}${correct}`;
+      const count = r.tally[i] || 0;
+      const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+      const statHtml = r.isScored
+        ? `<div class="stat"><div class="pct">${pct}%</div><div class="num">(${count} ${count === 1 ? 'vote' : 'votes'})</div></div>`
+        : `<div class="stat"><div class="pct">${pct}%</div></div>`;
+      tile.innerHTML = `
+        ${isCorrect ? '<div class="correct-badge">CORRECT</div>' : ''}
+        <div class="top"><span class="shape"></span><span>${escape(text)}</span></div>
+        ${statHtml}
       `;
-      body.appendChild(row);
+      grid.appendChild(tile);
     });
+    body.appendChild(grid);
   }
   show('reveal');
 });
@@ -388,15 +536,13 @@ socket.on('game:finished', ({ podium }) => {
   $('nextBtn').classList.add('hidden');
   $('skipBtn').classList.add('hidden');
   $('leaderboardBtn').classList.add('hidden');
+  $('newSessionBtn').classList.remove('hidden');
 
   const el = $('podiumEl');
   el.innerHTML = '';
   const order = [1, 0, 2]; // 2nd, 1st, 3rd visually
   order.forEach(i => {
-    if (!podium[i]) {
-      el.appendChild(document.createElement('div'));
-      return;
-    }
+    if (!podium[i]) { el.appendChild(document.createElement('div')); return; }
     const block = document.createElement('div');
     block.className = `podium-block podium-${i + 1}`;
     block.innerHTML = `<div class="place">#${i + 1}</div><div class="name">${escape(podium[i].name)}</div><div class="score">${podium[i].score} pts</div>`;
