@@ -84,6 +84,9 @@
     justify-content: space-between;
     transition: opacity 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
   }
+  /* When this tile is the correct one, give the text room so the CORRECT badge
+     can sit above it instead of overlapping. */
+  .reveal-tile.correct { padding-top: 44px; }
   .reveal-tile.a { background: var(--tile-a); }
   .reveal-tile.b { background: var(--tile-b); }
   .reveal-tile.c { background: var(--tile-c); }
@@ -115,9 +118,11 @@
   .reveal-tile .pct { font-size: 1.8rem; }
   .reveal-tile .num { opacity: 0.85; font-size: 0.95rem; font-weight: 600; }
   .reveal-tile .correct-badge {
-    position: absolute; top: 10px; right: 12px;
+    position: absolute; top: 10px; left: 14px;
     background: #FFC933; color: var(--mango-7);
-    padding: 3px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 800;
+    padding: 4px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: 800;
+    letter-spacing: 0.04em;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
   }
 </style>
 </head>
@@ -202,6 +207,7 @@
   </div>
 
   <div class="controls">
+    <button id="backBtn" class="btn-ghost hidden">◀ Back</button>
     <button id="nextBtn" class="btn-primary hidden">Next ▶</button>
     <button id="skipBtn" class="btn-ghost hidden">Skip timer</button>
     <button id="leaderboardBtn" class="btn-secondary hidden">Show leaderboard</button>
@@ -315,6 +321,11 @@ function enterLobby(res) {
 $('nextBtn').addEventListener('click', () => socket.emit('host:next'));
 $('skipBtn').addEventListener('click', () => socket.emit('host:skip'));
 $('leaderboardBtn').addEventListener('click', () => socket.emit('host:showLeaderboard'));
+$('backBtn').addEventListener('click', () => {
+  if (confirm('Go back to the previous question? Players will replay it and any points from the last question will be undone.')) {
+    socket.emit('host:back');
+  }
+});
 $('endBtn').addEventListener('click', () => {
   if (confirm('End the game for everyone?')) socket.emit('host:end');
 });
@@ -339,6 +350,12 @@ $('newSessionBtn').addEventListener('click', () => {
 
 socket.on('state', (s) => {
   $('playerCount').textContent = `${s.players.length} player${s.players.length === 1 ? '' : 's'}`;
+  // Show "Back" whenever there's a prior question to return to.
+  const canGoBack =
+    (s.state === 'question'    && s.currentIndex >= 1) ||
+    (s.state === 'reveal'      && s.currentIndex >= 1) ||
+    (s.state === 'leaderboard' && s.currentIndex >= 1);
+  $('backBtn').classList.toggle('hidden', !canGoBack);
 });
 
 socket.on('player:joined', ({ name, count }) => {
@@ -536,6 +553,7 @@ socket.on('game:finished', ({ podium }) => {
   $('nextBtn').classList.add('hidden');
   $('skipBtn').classList.add('hidden');
   $('leaderboardBtn').classList.add('hidden');
+  $('backBtn').classList.add('hidden');
   $('newSessionBtn').classList.remove('hidden');
 
   const el = $('podiumEl');

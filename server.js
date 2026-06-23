@@ -387,6 +387,41 @@ io.on('connection', socket => {
     if (game.state === 'question') endQuestion(game);
   });
 
+  // Go back to the previous question. Rolls back any score earned on the question
+  // we're leaving so players don't get double-counted when it's re-played.
+  socket.on('host:back', () => {
+    const pin = socket.data.pin;
+    const game = games[pin];
+    if (!game || game.hostId !== socket.id) return;
+    // Determine which question to revert. If we're showing reveal/leaderboard
+    // we go back to the *current* one. If mid-question, we go back to the
+    // previous one. In both cases we undo the score of whatever was just played.
+    let target;
+    if (game.state === 'reveal' || game.state === 'leaderboard') {
+      target = game.currentIndex;            // re-play the question we just revealed
+    } else if (game.state === 'question') {
+      target = game.currentIndex - 1;        // step back to the prior question
+    } else {
+      return; // lobby / finished — nothing to go back to
+    }
+    if (target < 0) return;
+
+    // Undo the score delta from the question we're leaving (whichever index was last scored).
+    const leavingIndex = game.currentIndex;
+    if (leavingIndex >= 0 && leavingIndex < game.quiz.questions.length) {
+      for (const p of Object.values(game.players)) {
+        if (typeof p.lastDelta === 'number' && p.lastDelta > 0) {
+          p.score -= p.lastDelta;
+          if (p.score < 0) p.score = 0;
+        }
+        p.lastDelta = 0;
+        p.lastAnswer = null;
+      }
+    }
+    game.currentIndex = target;
+    startQuestion(game);
+  });
+
   socket.on('host:end', () => {
     const pin = socket.data.pin;
     const game = games[pin];

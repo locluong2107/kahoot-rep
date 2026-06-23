@@ -128,7 +128,7 @@ module.exports = function seed() {
           },
           {
             type: 'quiz',
-            text: 'AI drafts a budget summary for your area — but the OpEx figure is €50K off. What is the most likely cause?',
+            text: 'AI drafts a budget summary for your unit — but the figure is €50K off. What\'s the most likely cause?',
             time: 30,
             points: 'double',
             options: [
