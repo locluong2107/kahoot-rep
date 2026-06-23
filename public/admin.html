@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Admin — SAP Kahoot</title>
+<link rel="stylesheet" href="/styles.css" />
+<style>
+  .admin-wrap { max-width: 1100px; margin: 0 auto; padding: 24px; color: white; }
+  .panel { background: white; color: var(--grey-11); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); margin-bottom: 20px; }
+  .panel h3 { margin: 0 0 16px; }
+  .quiz-row { display:flex; align-items:center; justify-content:space-between; padding: 10px 0; border-bottom: 1px solid var(--grey-2); }
+  .quiz-row:last-child { border: none; }
+  .question-card {
+    background: var(--grey-2);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 12px;
+    border-left: 4px solid var(--blue-6);
+  }
+  .question-card.poll { border-left-color: var(--indigo-6); }
+  .question-card.wordcloud { border-left-color: var(--raspberry-6); }
+  .question-card.truefalse { border-left-color: var(--teal-6); }
+  .question-card.quiz { border-left-color: var(--blue-6); }
+  .qhead { display:flex; gap:12px; align-items:center; margin-bottom: 10px; }
+  .qhead select, .qhead input { width: auto; }
+  .qtext { width:100%; margin-bottom: 10px; }
+  .option-row { display:flex; gap:8px; margin-bottom: 6px; align-items:center; }
+  .option-row input[type=text] { flex: 1; }
+  .badge {
+    padding: 3px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 700;
+    background: var(--blue-6); color: white;
+  }
+  .badge.poll { background: var(--indigo-6); }
+  .badge.wordcloud { background: var(--raspberry-6); }
+  .badge.truefalse { background: var(--teal-6); }
+  .toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px; }
+  .small { padding: 6px 10px; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div class="admin-wrap">
+  <div class="brand"><h1>SAP Kahoot — Admin</h1><p>Manage quizzes and questions</p></div>
+
+  <!-- Quiz list -->
+  <div class="panel">
+    <div class="toolbar">
+      <h3 style="margin:0;">Your quizzes</h3>
+      <button class="btn-primary small" id="newQuizBtn">+ New quiz</button>
+    </div>
+    <div id="quizList"></div>
+  </div>
+
+  <!-- Editor -->
+  <div id="editor" class="panel hidden">
+    <div class="toolbar">
+      <h3 style="margin:0;">Edit quiz</h3>
+      <div class="row">
+        <button class="btn-ghost small" style="color: var(--grey-7); border-color: var(--grey-4);" id="cancelBtn">Close</button>
+        <button class="btn-primary small" id="saveBtn">Save</button>
+      </div>
+    </div>
+    <input id="quizTitleInput" type="text" placeholder="Quiz title" />
+    <input id="quizSubtitleInput" type="text" placeholder="Subtitle (optional)" style="margin-top: 8px;" />
+    <hr style="margin: 18px 0; border:none; border-top:1px solid var(--grey-2);" />
+    <div id="questionsList"></div>
+    <div class="row" style="margin-top: 14px; flex-wrap: wrap;">
+      <button class="btn-secondary small" data-add="quiz">+ Quiz (multiple choice)</button>
+      <button class="btn-secondary small" data-add="truefalse">+ True / False</button>
+      <button class="btn-secondary small" data-add="poll">+ Poll</button>
+      <button class="btn-secondary small" data-add="wordcloud">+ Word Cloud</button>
+    </div>
+  </div>
+
+  <p style="text-align:center;"><a href="/host.html" style="color: var(--blue-4);">→ Open host screen</a> · <a href="/" style="color: var(--blue-4);">→ Player view</a></p>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const toast = (msg, color) => {
+  const t = $('toast'); t.textContent = msg;
+  t.style.background = color || 'var(--green-6)';
+  t.classList.remove('hidden');
+  setTimeout(() => t.classList.add('hidden'), 2000);
+};
+
+let quizzes = [];
+let editing = null;
+
+async function loadQuizzes() {
+  const res = await fetch('/api/quizzes');
+  quizzes = await res.json();
+  renderList();
+}
+function renderList() {
+  const list = $('quizList');
+  list.innerHTML = '';
+  if (!quizzes.length) {
+    list.innerHTML = '<p class="muted" style="color: var(--grey-7);">No quizzes yet. Click "New quiz" to create one.</p>';
+    return;
+  }
+  quizzes.forEach(q => {
+    const row = document.createElement('div');
+    row.className = 'quiz-row';
+    row.innerHTML = `
+      <div>
+        <strong>${escape(q.title)}</strong>
+        <div class="muted" style="color: var(--grey-7);">${q.questions.length} questions</div>
+      </div>
+      <div class="row">
+        <button class="btn-secondary small" data-edit="${q.id}">Edit</button>
+        <button class="btn-danger small" data-del="${q.id}">Delete</button>
+      </div>
+    `;
+    list.appendChild(row);
+  });
+  list.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => editQuiz(b.dataset.edit)));
+  list.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Delete this quiz?')) return;
+    await fetch('/api/quizzes/' + b.dataset.del, { method: 'DELETE' });
+    loadQuizzes();
+  }));
+}
+
+$('newQuizBtn').addEventListener('click', () => {
+  editing = { title: 'New quiz', questions: [] };
+  renderEditor();
+});
+
+function editQuiz(id) {
+  const q = quizzes.find(q => q.id === id);
+  editing = JSON.parse(JSON.stringify(q));
+  renderEditor();
+}
+
+function renderEditor() {
+  $('editor').classList.remove('hidden');
+  $('quizTitleInput').value = editing.title || '';
+  $('quizSubtitleInput').value = editing.subtitle || '';
+  const list = $('questionsList');
+  list.innerHTML = '';
+  editing.questions.forEach((q, idx) => list.appendChild(renderQuestion(q, idx)));
+  window.scrollTo({ top: $('editor').offsetTop - 20, behavior: 'smooth' });
+}
+
+function renderQuestion(q, idx) {
+  const card = document.createElement('div');
+  card.className = `question-card ${q.type}`;
+  card.dataset.idx = idx;
+
+  const head = document.createElement('div');
+  head.className = 'qhead';
+  head.innerHTML = `
+    <span class="badge ${q.type}">${prettyType(q.type)}</span>
+    <span class="muted">Q${idx + 1}</span>
+    <span class="grow"></span>
+    <label class="muted" style="font-size:0.9rem;">Time (s)
+      <input type="number" min="5" max="120" value="${q.time || 20}" data-field="time" style="width:80px; padding:6px;" />
+    </label>
+    ${q.type === 'quiz' ? `<label class="muted" style="font-size:0.9rem;">Points
+      <select data-field="points" style="width:auto; padding:6px;">
+        <option value="">Standard</option>
+        <option value="double" ${q.points === 'double' ? 'selected' : ''}>Double</option>
+      </select></label>` : ''}
+    <button class="btn-ghost small" style="color: var(--grey-7); border-color: var(--grey-4);" data-up>↑</button>
+    <button class="btn-ghost small" style="color: var(--grey-7); border-color: var(--grey-4);" data-down>↓</button>
+    <button class="btn-danger small" data-remove>✕</button>
+  `;
+  card.appendChild(head);
+
+  const text = document.createElement('input');
+  text.className = 'qtext';
+  text.type = 'text';
+  text.placeholder = 'Question text';
+  text.value = q.text || '';
+  text.dataset.field = 'text';
+  card.appendChild(text);
+
+  if (q.type === 'quiz' || q.type === 'poll') {
+    if (!q.options) q.options = [];
+    while (q.options.length < 2) q.options.push({ text: '' });
+    q.options.forEach((opt, i) => {
+      const row = document.createElement('div');
+      row.className = 'option-row';
+      row.innerHTML = `
+        <input type="text" placeholder="Option ${i + 1}" value="${escape(opt.text || '')}" data-opt="${i}" />
+        ${q.type === 'quiz' ? `<label class="muted" style="white-space:nowrap;"><input type="radio" name="correct-${idx}" ${opt.correct ? 'checked' : ''} data-correct="${i}" /> correct</label>` : ''}
+        <button class="btn-ghost small" style="color: var(--grey-7); border-color: var(--grey-4);" data-opt-remove="${i}">✕</button>
+      `;
+      card.appendChild(row);
+    });
+    const add = document.createElement('button');
+    add.className = 'btn-secondary small';
+    add.textContent = '+ Add option';
+    add.dataset.optAdd = '';
+    card.appendChild(add);
+  } else if (q.type === 'truefalse') {
+    const row = document.createElement('div');
+    row.className = 'option-row';
+    row.innerHTML = `
+      <label><input type="radio" name="tf-${idx}" value="true" ${q.answer === true ? 'checked' : ''} data-tf /> True is correct</label>
+      &nbsp;&nbsp;
+      <label><input type="radio" name="tf-${idx}" value="false" ${q.answer === false ? 'checked' : ''} data-tf /> False is correct</label>
+    `;
+    card.appendChild(row);
+  } else if (q.type === 'wordcloud') {
+    const note = document.createElement('div');
+    note.className = 'muted';
+    note.style.color = 'var(--grey-7)';
+    note.textContent = 'Players will type a free-text word/phrase. No correct answer.';
+    card.appendChild(note);
+  }
+
+  // wire events using delegation on the card
+  card.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t.dataset.field === 'text') q.text = t.value;
+    if (t.dataset.field === 'time') q.time = parseInt(t.value) || 20;
+    if (t.dataset.field === 'points') q.points = t.value || undefined;
+    if (t.dataset.opt !== undefined) q.options[+t.dataset.opt].text = t.value;
+  });
+  card.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.dataset.correct !== undefined) {
+      q.options.forEach((o, i) => o.correct = (i === +t.dataset.correct));
+    }
+    if (t.hasAttribute('data-tf')) q.answer = (t.value === 'true');
+  });
+  card.addEventListener('click', (e) => {
+    const t = e.target;
+    if (t.hasAttribute('data-remove')) { editing.questions.splice(idx, 1); renderEditor(); }
+    else if (t.hasAttribute('data-up') && idx > 0) {
+      [editing.questions[idx-1], editing.questions[idx]] = [editing.questions[idx], editing.questions[idx-1]];
+      renderEditor();
+    }
+    else if (t.hasAttribute('data-down') && idx < editing.questions.length - 1) {
+      [editing.questions[idx+1], editing.questions[idx]] = [editing.questions[idx], editing.questions[idx+1]];
+      renderEditor();
+    }
+    else if (t.hasAttribute('data-opt-add')) {
+      q.options.push({ text: '' }); renderEditor();
+    }
+    else if (t.hasAttribute('data-opt-remove')) {
+      q.options.splice(+t.dataset.optRemove, 1); renderEditor();
+    }
+  });
+  return card;
+}
+
+document.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () => {
+  const type = b.dataset.add;
+  const base = { type, text: '', time: type === 'wordcloud' ? 45 : type === 'poll' ? 30 : 20 };
+  if (type === 'quiz') base.options = [{ text: '', correct: true }, { text: '' }, { text: '' }, { text: '' }];
+  if (type === 'poll') base.options = [{ text: '' }, { text: '' }, { text: '' }, { text: '' }];
+  if (type === 'truefalse') base.answer = true;
+  editing.questions.push(base);
+  renderEditor();
+}));
+
+$('cancelBtn').addEventListener('click', () => {
+  $('editor').classList.add('hidden');
+  editing = null;
+});
+
+$('saveBtn').addEventListener('click', async () => {
+  if (!editing) return;
+  editing.title = $('quizTitleInput').value.trim() || 'Untitled quiz';
+  editing.subtitle = $('quizSubtitleInput').value.trim();
+  if (!editing.questions.length) return toast('Add at least one question', 'var(--red-6)');
+  const res = await fetch('/api/quizzes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(editing),
+  });
+  const saved = await res.json();
+  editing = saved;
+  toast('Saved ✓');
+  await loadQuizzes();
+});
+
+function prettyType(t) {
+  return { quiz: 'Quiz', truefalse: 'True/False', poll: 'Poll', wordcloud: 'Word Cloud' }[t] || t;
+}
+function escape(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+loadQuizzes();
+</script>
+</body>
+</html>

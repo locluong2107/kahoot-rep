@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#00144A" />
+<title>Join — Are You Smarter Than a Chatbot?</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div class="center-stage">
+  <div style="width: 100%; max-width: 460px;">
+    <!-- Join screen -->
+    <div id="screen-join" class="col">
+      <div class="brand">
+        <h1>Join the Game</h1>
+        <p>Enter your PIN to play</p>
+      </div>
+      <div class="card col">
+        <input id="pinInput" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="Game PIN" autocomplete="off" />
+        <input id="nameInput" type="text" maxlength="24" placeholder="Your nickname" autocomplete="off" />
+        <button id="joinBtn" class="btn-primary">Enter</button>
+      </div>
+      <p class="muted" style="text-align:center;">Tip: ask the host for the PIN shown on the big screen.</p>
+    </div>
+
+    <!-- Lobby -->
+    <div id="screen-lobby" class="col hidden">
+      <div class="brand">
+        <h1 id="lobbyName">You're in!</h1>
+        <p>Waiting for the host to start…</p>
+      </div>
+      <div class="card" style="text-align:center;">
+        <div class="player-chip" id="myName">—</div>
+        <p class="muted" style="margin-top:14px;">Keep this tab open. The first question will appear here.</p>
+      </div>
+    </div>
+
+    <!-- Answer screen -->
+    <div id="screen-answer" class="col hidden">
+      <div class="brand" style="margin-bottom:10px;">
+        <h1 style="font-size: 1.4rem;" id="questionPrompt">Pick your answer</h1>
+      </div>
+      <div id="tileGrid" class="tile-grid"></div>
+      <div id="wordcloudInput" class="card col hidden">
+        <input id="wordInput" type="text" maxlength="40" placeholder="One word…" />
+        <button id="sendWordBtn" class="btn-primary">Send</button>
+      </div>
+      <div class="row between" style="margin-top:14px; color:white;">
+        <span class="players-pill" id="answerStatus">Tap an answer</span>
+        <span class="timer-pill" id="playerTimer">—</span>
+      </div>
+    </div>
+
+    <!-- Waiting / result -->
+    <div id="screen-result" class="col hidden">
+      <div class="card" style="text-align:center;">
+        <div id="resultBig" style="font-size: 2.2rem; font-weight: 800; margin-bottom: 8px;">⏳</div>
+        <div id="resultMsg" class="muted">Waiting for the host…</div>
+        <div id="resultScore" style="margin-top:18px; font-size:1.5rem; font-weight:700; color: var(--blue-7);"></div>
+        <div id="resultRank" class="muted"></div>
+      </div>
+    </div>
+
+    <!-- Finished -->
+    <div id="screen-finished" class="col hidden">
+      <div class="card" style="text-align:center;">
+        <div style="font-size:3rem;">🎉</div>
+        <h2>Thanks for playing!</h2>
+        <div id="finalScore" style="font-size:1.6rem; font-weight:700; color:var(--blue-7);"></div>
+        <div id="finalRank" class="muted"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/sounds.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const show = (which) => {
+  for (const s of ['join','lobby','answer','result','finished']) {
+    $('screen-' + s).classList.toggle('hidden', s !== which);
+  }
+};
+const toast = (msg) => {
+  const t = $('toast'); t.textContent = msg; t.classList.remove('hidden');
+  setTimeout(() => t.classList.add('hidden'), 2400);
+};
+
+const socket = io();
+let myName = '';
+let currentQuestion = null;
+let timerInterval = null;
+
+// Preserve PIN from URL (?pin=123456) so a QR code can drop you here
+const params = new URLSearchParams(location.search);
+if (params.get('pin')) $('pinInput').value = params.get('pin');
+
+$('joinBtn').addEventListener('click', () => {
+  Sound.resume();
+  const pin = $('pinInput').value.trim();
+  const name = $('nameInput').value.trim();
+  if (!pin || !name) return toast('Enter PIN and nickname');
+  socket.emit('player:join', { pin, name }, (res) => {
+    if (res.error) return toast(res.error);
+    myName = res.name;
+    $('myName').textContent = myName;
+    $('lobbyName').textContent = `Hi ${myName}!`;
+    show('lobby');
+    Sound.play('join');
+  });
+});
+$('nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('joinBtn').click(); });
+
+socket.on('question:start', ({ question, index, total }) => {
+  Sound.play('questionStart');
+  currentQuestion = question;
+  $('questionPrompt').textContent = `Q${index + 1}/${total}`;
+  $('answerStatus').textContent = 'Tap an answer';
+  $('wordcloudInput').classList.add('hidden');
+  $('tileGrid').classList.remove('hidden');
+
+  if (question.type === 'wordcloud') {
+    $('tileGrid').classList.add('hidden');
+    $('wordcloudInput').classList.remove('hidden');
+    $('wordInput').value = '';
+    $('wordInput').disabled = false;
+    $('sendWordBtn').disabled = false;
+  } else {
+    renderTiles(question.options);
+  }
+  show('answer');
+  startTimer(question.time);
+});
+
+function renderTiles(options) {
+  const grid = $('tileGrid');
+  grid.innerHTML = '';
+  const letters = ['a','b','c','d'];
+  options.forEach((opt, i) => {
+    const btn = document.createElement('button');
+    btn.className = `tile ${letters[i]}`;
+    btn.innerHTML = `<span class="shape"></span><span>${escape(opt.text)}</span>`;
+    btn.addEventListener('click', () => {
+      [...grid.children].forEach(c => c.disabled = true);
+      btn.classList.add('selected');
+      socket.emit('player:answer', { choice: i });
+      $('answerStatus').textContent = 'Answer locked in ✓';
+      Sound.play('click');
+    });
+    grid.appendChild(btn);
+  });
+}
+
+$('sendWordBtn').addEventListener('click', () => {
+  const v = $('wordInput').value.trim();
+  if (!v) return toast('Type a word');
+  socket.emit('player:answer', { text: v });
+  $('wordInput').disabled = true;
+  $('sendWordBtn').disabled = true;
+  $('answerStatus').textContent = 'Sent ✓';
+});
+
+function startTimer(seconds) {
+  let remaining = seconds;
+  $('playerTimer').textContent = remaining + 's';
+  clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    remaining--;
+    $('playerTimer').textContent = Math.max(0, remaining) + 's';
+    if (remaining <= 0) clearInterval(timerInterval);
+  }, 1000);
+}
+
+socket.on('player:result', ({ answered, isCorrect, score, delta, type }) => {
+  clearInterval(timerInterval);
+  let big = '⏳', msg = '';
+  if (type === 'poll' || type === 'wordcloud') {
+    big = answered ? '✓' : '—';
+    msg = answered ? 'Answer recorded' : 'No answer';
+  } else {
+    if (!answered) { big = '⏰'; msg = 'No answer'; Sound.play('wrong'); }
+    else if (isCorrect) { big = '✅'; msg = `Correct! +${delta}`; Sound.play('correct'); }
+    else { big = '❌'; msg = 'Not this time'; Sound.play('wrong'); }
+  }
+  $('resultBig').textContent = big;
+  $('resultMsg').textContent = msg;
+  $('resultScore').textContent = `Score: ${score}`;
+  show('result');
+});
+
+socket.on('player:rank', ({ rank, total, score }) => {
+  $('resultRank').textContent = `Rank ${rank} of ${total}`;
+  $('finalRank').textContent = `Final rank: ${rank} of ${total}`;
+  $('finalScore').textContent = `Score: ${score}`;
+});
+
+socket.on('game:finished', () => { Sound.play('podium'); show('finished'); });
+socket.on('game:ended', ({ reason }) => {
+  toast(reason || 'Game ended');
+  setTimeout(() => location.reload(), 1500);
+});
+
+function escape(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+</script>
+</body>
+</html>

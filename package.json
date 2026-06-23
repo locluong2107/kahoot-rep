@@ -1,0 +1,15 @@
+{
+  "name": "sap-kahoot",
+  "version": "1.0.0",
+  "description": "Interactive team-meeting quiz platform (Kahoot-style) with SAP branding",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.7.5"
+  }
+}
