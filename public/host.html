@@ -177,7 +177,7 @@
       <div class="question-header" id="qHeader">Question 1 of 13</div>
       <div class="huge-question" id="qText">…</div>
       <div id="qTiles" class="tile-grid"></div>
-      <div id="qWordcloud" class="wordcloud hidden"></div>
+      <div id="qWordcloud" class="wordcloud-canvas hidden" style="width:100%;"></div>
       <!-- Real-time tally bars (shown for polls during the question) -->
       <div id="liveTally" class="live-tally hidden"></div>
       <div class="row" style="margin-top:14px;">
@@ -386,11 +386,12 @@ socket.on('question:start', ({ question, index, total }) => {
 
   if (question.type === 'wordcloud') {
     $('qWordcloud').classList.remove('hidden');
-    const placeholder = document.createElement('div');
-    placeholder.className = 'muted';
-    placeholder.style.color = 'var(--blue-4)';
-    placeholder.textContent = 'Players are typing on their devices…';
-    $('qWordcloud').appendChild(placeholder);
+    // Start with an empty white canvas and a placeholder
+    $('qWordcloud').className = 'wordcloud-canvas';
+    const ph = document.createElement('span');
+    ph.className = 'wc-placeholder';
+    ph.textContent = 'Players are typing on their devices…';
+    $('qWordcloud').appendChild(ph);
   } else {
     $('qTiles').classList.remove('hidden');
     const letters = ['a','b','c','d'];
@@ -433,25 +434,9 @@ socket.on('live:tally', ({ type, tally, totalPlayers, answered }) => {
 
 socket.on('live:wordcloud', ({ words, totalPlayers, donePlayers }) => {
   if (!currentQuestion || currentQuestion.type !== 'wordcloud') return;
-  const cloud = $('qWordcloud');
-  cloud.innerHTML = '';
-  if (!words.length) {
-    const ph = document.createElement('div');
-    ph.className = 'muted';
-    ph.style.color = 'var(--blue-4)';
-    ph.textContent = 'Waiting for words…';
-    cloud.appendChild(ph);
-    return;
-  }
-  const max = Math.max(1, ...words.map(w => w.count));
-  // sort by frequency descending for a more "cloud-like" feel
-  words.slice().sort((a,b) => b.count - a.count).forEach(({ word, count }) => {
-    const el = document.createElement('span');
-    const size = Math.min(4, Math.max(1, Math.ceil((count / max) * 4)));
-    el.className = `word size-${size}`;
-    el.textContent = count > 1 ? `${word} ×${count}` : word;
-    cloud.appendChild(el);
-  });
+  const el = $('qWordcloud');
+  el.className = 'wordcloud-canvas';
+  renderWordCloud(el, words);
 });
 
 function renderLiveTally(optionTexts, tally, answered) {
@@ -491,15 +476,8 @@ socket.on('question:reveal', (r) => {
 
   if (r.type === 'wordcloud') {
     const cloud = document.createElement('div');
-    cloud.className = 'wordcloud';
-    const max = Math.max(1, ...r.words.map(w => w.count));
-    r.words.slice().sort((a,b) => b.count - a.count).forEach(({ word, count }) => {
-      const el = document.createElement('span');
-      const size = Math.min(4, Math.max(1, Math.ceil((count / max) * 4)));
-      el.className = `word size-${size}`;
-      el.textContent = count > 1 ? `${word} ×${count}` : word;
-      cloud.appendChild(el);
-    });
+    cloud.className = 'wordcloud-canvas';
+    renderWordCloud(cloud, r.words);
     body.appendChild(cloud);
   } else {
     // Tile-style reveal with correct-answer HIGHLIGHTING (not a tick).
@@ -590,6 +568,47 @@ function startTimer(seconds) {
     if (remaining === 0) Sound.play('timesUp');
     if (remaining <= 0) clearInterval(timerInterval);
   }, 1000);
+}
+
+// SAP word-cloud palette — rich multi-colour like the reference image
+const WC_COLORS = [
+  '#7858FF', // indigo-6
+  '#C35500', // mango-7
+  '#1B90FF', // blue-6
+  '#FA4F96', // raspberry-6
+  '#36A41D', // green-6
+  '#049F9A', // teal-6
+  '#DF1278', // raspberry-7
+  '#002A86', // blue-10
+  '#E76500', // mango-6
+  '#5D36FF', // indigo-7
+];
+
+// Render word-cloud words into `container` using the reference style:
+// no pill backgrounds, bold colored text, sizes driven by frequency.
+function renderWordCloud(container, words) {
+  container.innerHTML = '';
+  if (!words || !words.length) {
+    const ph = document.createElement('span');
+    ph.className = 'wc-placeholder';
+    ph.textContent = 'Waiting for words…';
+    container.appendChild(ph);
+    return;
+  }
+  const max = Math.max(1, ...words.map(w => w.count));
+  // Shuffle so same-frequency words don't always cluster; use deterministic
+  // position in sorted array as color index so colors stay stable on update.
+  const sorted = words.slice().sort((a, b) => b.count - a.count);
+  sorted.forEach(({ word, count }, idx) => {
+    const ratio = count / max;
+    // 5-level size: 1 = smallest, 5 = largest
+    const level = ratio >= 0.9 ? 5 : ratio >= 0.65 ? 4 : ratio >= 0.4 ? 3 : ratio >= 0.2 ? 2 : 1;
+    const el = document.createElement('span');
+    el.className = `word s${level}`;
+    el.style.color = WC_COLORS[idx % WC_COLORS.length];
+    el.textContent = word;
+    container.appendChild(el);
+  });
 }
 
 function prettyType(t) {

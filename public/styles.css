@@ -283,6 +283,44 @@ input:focus, textarea:focus, select:focus {
 .podium-2 { height: 220px; background: linear-gradient(180deg, var(--grey-4), #fff); }
 .podium-3 { height: 180px; background: linear-gradient(180deg, var(--mango-6), #fff); color: white; }
 
+/* ---- Word cloud ---- */
+/* White canvas, bare bold text at varying sizes — matches the reference design.
+   No pill backgrounds; colour alone differentiates the words.               */
+.wordcloud-canvas {
+  background: white;
+  border-radius: 20px;
+  padding: 36px 32px;
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px 18px;
+  box-shadow: var(--shadow);
+  min-height: 220px;
+}
+/* Placeholder text shown while waiting for first words */
+.wordcloud-canvas .wc-placeholder {
+  color: var(--grey-4);
+  font-size: 1.1rem;
+  font-style: italic;
+}
+/* Each word — no background, no border, just bold colored text */
+.wordcloud-canvas .word {
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  animation: pop 0.35s ease;
+  /* colour assigned inline by JS from the palette */
+}
+/* Font sizes mapping: 5 levels */
+.wordcloud-canvas .word.s1 { font-size: 1.1rem;  font-weight: 600; }
+.wordcloud-canvas .word.s2 { font-size: 1.6rem; }
+.wordcloud-canvas .word.s3 { font-size: 2.4rem; }
+.wordcloud-canvas .word.s4 { font-size: 3.2rem; }
+.wordcloud-canvas .word.s5 { font-size: 4.2rem; }
+
+/* Legacy class kept so the player-side (index.html) inline cloud still works */
 .wordcloud {
   display: flex;
   flex-wrap: wrap;
