@@ -177,7 +177,7 @@
       <div class="question-header" id="qHeader">Question 1 of 13</div>
       <div class="huge-question" id="qText">…</div>
       <div id="qTiles" class="tile-grid"></div>
-      <div id="qWordcloud" class="wordcloud-canvas hidden" style="width:100%;"></div>
+      <div id="qWordcloud" class="wordcloud-canvas hidden" style="width:100%; height:400px;"></div>
       <!-- Real-time tally bars (shown for polls during the question) -->
       <div id="liveTally" class="live-tally hidden"></div>
       <div class="row" style="margin-top:14px;">
@@ -218,6 +218,7 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script src="/sounds.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/wordcloud@1.2.2/src/wordcloud2.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const show = (which) => {
@@ -386,6 +387,9 @@ socket.on('question:start', ({ question, index, total }) => {
 
   if (question.type === 'wordcloud') {
     $('qWordcloud').classList.remove('hidden');
+    // Reset color map so this cloud gets a fresh palette
+    Object.keys(wcColorMap).forEach(k => delete wcColorMap[k]);
+    wcColorIdx = 0;
     // Start with an empty white canvas and a placeholder
     $('qWordcloud').className = 'wordcloud-canvas';
     const ph = document.createElement('span');
@@ -477,6 +481,7 @@ socket.on('question:reveal', (r) => {
   if (r.type === 'wordcloud') {
     const cloud = document.createElement('div');
     cloud.className = 'wordcloud-canvas';
+    cloud.style.height = '420px';
     renderWordCloud(cloud, r.words);
     body.appendChild(cloud);
   } else {
@@ -584,10 +589,19 @@ const WC_COLORS = [
   '#5D36FF', // indigo-7
 ];
 
-// Render word-cloud words into `container` using the reference style:
-// no pill backgrounds, bold colored text, sizes driven by frequency.
+// Assign a stable color to each unique word string.
+const wcColorMap = {};
+let wcColorIdx = 0;
+function wcColor(word) {
+  if (!wcColorMap[word]) wcColorMap[word] = WC_COLORS[wcColorIdx++ % WC_COLORS.length];
+  return wcColorMap[word];
+}
+
+// Render a proper canvas word cloud using WordCloud2.js.
+// Falls back to the flex-wrap span layout when the library is absent.
 function renderWordCloud(container, words) {
   container.innerHTML = '';
+
   if (!words || !words.length) {
     const ph = document.createElement('span');
     ph.className = 'wc-placeholder';
@@ -595,17 +609,53 @@ function renderWordCloud(container, words) {
     container.appendChild(ph);
     return;
   }
-  const max = Math.max(1, ...words.map(w => w.count));
-  // Shuffle so same-frequency words don't always cluster; use deterministic
-  // position in sorted array as color index so colors stay stable on update.
+
   const sorted = words.slice().sort((a, b) => b.count - a.count);
+  const max = sorted[0].count;
+
+  // Try WordCloud2.js (canvas) path
+  if (typeof WordCloud !== 'undefined') {
+    const canvas = document.createElement('canvas');
+    const w = container.offsetWidth || 900;
+    const h = container.offsetHeight || 400;
+    canvas.width  = w * (window.devicePixelRatio || 1);
+    canvas.height = h * (window.devicePixelRatio || 1);
+    canvas.style.width  = w + 'px';
+    canvas.style.height = h + 'px';
+    container.appendChild(canvas);
+
+    // Scale font sizes so the biggest word fills ~28% of canvas width
+    const baseSize = Math.max(14, Math.round(w * 0.28 / (sorted[0].word.length || 1)));
+    const list = sorted.map(({ word, count }) => {
+      const ratio = count / max;
+      const size = Math.round(baseSize * (0.25 + ratio * 0.75));
+      return [word, size];
+    });
+
+    WordCloud(canvas, {
+      list,
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      fontWeight: '700',
+      color: (word) => wcColor(word),
+      rotateRatio: 0.35,
+      rotationSteps: 2,  // 0° or 90° only — readable
+      backgroundColor: 'white',
+      gridSize: Math.round(w / 60),
+      minSize: 10,
+      drawOutOfBound: false,
+      shrinkToFit: true,
+    });
+    return;
+  }
+
+  // Fallback: flex-wrap spans (same as before, no library needed)
+  container.classList.add('wc-fallback');
   sorted.forEach(({ word, count }, idx) => {
     const ratio = count / max;
-    // 5-level size: 1 = smallest, 5 = largest
     const level = ratio >= 0.9 ? 5 : ratio >= 0.65 ? 4 : ratio >= 0.4 ? 3 : ratio >= 0.2 ? 2 : 1;
     const el = document.createElement('span');
     el.className = `word s${level}`;
-    el.style.color = WC_COLORS[idx % WC_COLORS.length];
+    el.style.color = wcColor(word);
     el.textContent = word;
     container.appendChild(el);
   });

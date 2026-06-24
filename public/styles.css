@@ -284,37 +284,35 @@ input:focus, textarea:focus, select:focus {
 .podium-3 { height: 180px; background: linear-gradient(180deg, var(--mango-6), #fff); color: white; }
 
 /* ---- Word cloud ---- */
-/* White canvas, bare bold text at varying sizes — matches the reference design.
-   No pill backgrounds; colour alone differentiates the words.               */
+/* Canvas shell — WordCloud2.js draws inside a <canvas> child.
+   position:relative so the placeholder can be centered absolutely. */
 .wordcloud-canvas {
   background: white;
   border-radius: 20px;
-  padding: 36px 32px;
   width: 100%;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 10px 18px;
   box-shadow: var(--shadow);
-  min-height: 220px;
+  min-height: 260px;
+  overflow: hidden;
+  position: relative;
 }
-/* Placeholder text shown while waiting for first words */
+/* Placeholder centered over the empty shell */
 .wordcloud-canvas .wc-placeholder {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
   color: var(--grey-4);
   font-size: 1.1rem;
   font-style: italic;
+  white-space: nowrap;
 }
-/* Each word — no background, no border, just bold colored text */
-.wordcloud-canvas .word {
-  font-weight: 700;
-  line-height: 1.15;
-  letter-spacing: -0.01em;
-  animation: pop 0.35s ease;
-  /* colour assigned inline by JS from the palette */
+/* Fallback word spans (used when WordCloud2.js fails to load) */
+.wordcloud-canvas.wc-fallback {
+  display: flex; flex-wrap: wrap;
+  align-items: center; justify-content: center;
+  padding: 32px; gap: 10px 18px;
 }
-/* Font sizes mapping: 5 levels */
-.wordcloud-canvas .word.s1 { font-size: 1.1rem;  font-weight: 600; }
+.wordcloud-canvas .word { font-weight: 700; line-height: 1.15; animation: pop 0.35s ease; }
+.wordcloud-canvas .word.s1 { font-size: 1.1rem; font-weight: 600; }
 .wordcloud-canvas .word.s2 { font-size: 1.6rem; }
 .wordcloud-canvas .word.s3 { font-size: 2.4rem; }
 .wordcloud-canvas .word.s4 { font-size: 3.2rem; }
