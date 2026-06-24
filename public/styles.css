@@ -149,6 +149,10 @@ input:focus, textarea:focus, select:focus {
   gap: 14px;
   width: 100%;
 }
+/* 3-option questions: single column so tiles don't orphan */
+.tile-grid.cols-1 {
+  grid-template-columns: 1fr;
+}
 .tile {
   min-height: 90px;
   border-radius: var(--radius);

@@ -304,6 +304,7 @@ socket.on('question:start', ({ question, index, total, timeRemaining, alreadyAns
 function renderTiles(options, alreadyAnswered) {
   const grid = $('tileGrid');
   grid.innerHTML = '';
+  grid.classList.toggle('cols-1', options.length <= 3);
   const letters = ['a','b','c','d'];
   options.forEach((opt, i) => {
     const btn = document.createElement('button');

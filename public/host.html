@@ -51,6 +51,18 @@
   }
   .controls { display:flex; gap:12px; justify-content:center; padding: 16px; flex-wrap: wrap; }
   .question-header { color:white; font-size: 1.1rem; opacity: 0.8; text-align:center; }
+  .subtype-badge {
+    display: inline-block;
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: white;
+    border-radius: 999px;
+    padding: 4px 14px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    margin-top: 6px;
+  }
 
   .leaderboard { width: 100%; max-width: 700px; display:flex; flex-direction:column; gap:10px; }
   .lb-row {
@@ -69,6 +81,7 @@
 
   /* reveal-screen styling: highlight correct tiles, dim wrong ones */
   .reveal-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; width: 100%; }
+  .reveal-tiles.cols-1 { grid-template-columns: 1fr; }
   .reveal-tile {
     position: relative;
     min-height: 110px;
@@ -377,8 +390,9 @@ socket.on('question:start', ({ question, index, total }) => {
   Sound.stopMusic();
   Sound.play('questionStart');
   currentQuestion = question;
-  $('qHeader').textContent = `Question ${index + 1} of ${total} — ${prettyType(question.type)}`;
-  $('qText').textContent = question.text;
+  $('qHeader').innerHTML = `Question ${index + 1} of ${total} — ${prettyType(question.type)}` +
+    (question.subtype ? `<br><span class="subtype-badge">${prettySubtype(question.subtype)}</span>` : '');
+  $('qText').textContent = cleanQuestionText(question.text);
   $('qTiles').classList.add('hidden');
   $('qTiles').innerHTML = '';
   $('qWordcloud').classList.add('hidden');
@@ -406,6 +420,8 @@ socket.on('question:start', ({ question, index, total }) => {
       t.innerHTML = `<span class="shape"></span><span>${escape(o.text)}</span>`;
       $('qTiles').appendChild(t);
     });
+    // Single-column layout for 3-option questions (e.g. Two Truths & a Lie)
+    $('qTiles').classList.toggle('cols-1', question.options.length <= 3);
     // For polls, show LIVE tally bars under the tiles right away.
     if (question.type === 'poll') {
       $('liveTally').classList.remove('hidden');
@@ -474,7 +490,7 @@ socket.on('question:reveal', (r) => {
   $('leaderboardBtn').classList.toggle('hidden', !r.isScored);
 
   $('revealHeader').textContent = `${r.totalAnswers} / ${r.totalPlayers} answered`;
-  $('revealText').textContent = r.text;
+  $('revealText').textContent = cleanQuestionText(r.text);
 
   const body = $('revealBody');
   body.innerHTML = '';
@@ -492,6 +508,7 @@ socket.on('question:reveal', (r) => {
     const total = Object.values(r.tally).reduce((a,b) => a+b, 0) || 1;
     const grid = document.createElement('div');
     grid.className = 'reveal-tiles';
+    if (r.options.length <= 3) grid.classList.add('cols-1');
     r.options.forEach((text, i) => {
       const isCorrect = r.correctIndex === i;
       const hasCorrect = r.correctIndex !== null && r.correctIndex !== undefined;
@@ -664,6 +681,13 @@ function renderWordCloud(container, words) {
 
 function prettyType(t) {
   return { quiz: 'Quiz', truefalse: 'True / False', poll: 'Poll', wordcloud: 'Word Cloud' }[t] || t;
+}
+function prettySubtype(s) {
+  return { two_truths_one_lie: 'Two Truths & a Lie' }[s] || s;
+}
+// Strip subtype labels baked into legacy question text (e.g. "Round 1 — Which statement is FALSE? (Two Truths & a Lie)")
+function cleanQuestionText(text) {
+  return (text || '').replace(/\s*\(Two Truths\s*&(?:amp;)?\s*a\s*Lie\)/i, '').trim();
 }
 function escape(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 </script>

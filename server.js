@@ -132,6 +132,7 @@ function gameSnapshot(game) {
 
 function publicQuestion(q) {
   const base = { type: q.type, text: q.text, time: q.time || 20 };
+  if (q.subtype) base.subtype = q.subtype;
   if (q.type === 'quiz')           base.options = q.options.map(o => ({ text: o.text }));
   else if (q.type === 'truefalse') base.options = [{ text: 'True' }, { text: 'False' }];
   else if (q.type === 'poll')      base.options = q.options.map(o => ({ text: o.text }));
