@@ -1,4 +1,4 @@
-// SAP Kahoot - real-time team quiz server
+// Kohaat - real-time team quiz server
 // Run: npm install && npm start
 
 const express = require('express');
