@@ -7,32 +7,65 @@
 <title>Join — Are You Smarter Than a Chatbot?</title>
 <link rel="stylesheet" href="/styles.css" />
 <style>
-  /* Word cloud submission area */
   .word-list {
     display: flex; flex-wrap: wrap; gap: 6px;
-    min-height: 8px;
-    margin-top: 4px;
+    min-height: 8px; margin-top: 4px;
   }
   .word-list .my-word {
-    background: var(--blue-2);
-    color: var(--blue-7);
-    padding: 4px 10px;
-    border-radius: 999px;
-    font-size: 0.9rem;
-    font-weight: 600;
+    background: var(--blue-2); color: var(--blue-7);
+    padding: 4px 10px; border-radius: 999px;
+    font-size: 0.9rem; font-weight: 600;
   }
   .word-done-row { display: flex; gap: 8px; }
   .word-done-row button { flex: 1; }
-  .word-counter {
-    font-size: 0.85rem;
-    color: var(--grey-7);
-    margin-top: 4px;
+  .word-counter { font-size: 0.85rem; color: var(--grey-7); margin-top: 4px; }
+
+  /* Reconnecting overlay */
+  #reconnectOverlay {
+    position: fixed; inset: 0;
+    background: rgba(0, 20, 74, 0.92);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: white; gap: 18px; z-index: 200;
+    backdrop-filter: blur(4px);
+    transition: opacity 0.3s;
   }
+  #reconnectOverlay.hidden { display: none; }
+  #reconnectOverlay .spinner {
+    width: 48px; height: 48px;
+    border: 5px solid rgba(255,255,255,0.2);
+    border-top-color: var(--blue-4);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #reconnectOverlay h2 { margin: 0; font-size: 1.4rem; }
+  #reconnectOverlay p { margin: 0; color: var(--blue-4); font-size: 0.95rem; text-align: center; }
+
+  /* "Waiting between questions" banner */
+  .waiting-banner {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+    color: white;
+  }
+  .waiting-banner p { margin: 8px 0 0; color: var(--blue-4); }
 </style>
 </head>
 <body>
+
+<!-- Reconnect overlay — shown automatically when the socket drops -->
+<div id="reconnectOverlay" class="hidden">
+  <div class="spinner"></div>
+  <h2>Reconnecting…</h2>
+  <p id="reconnectMsg">Hang on, getting you back in.</p>
+</div>
+
 <div class="center-stage">
   <div style="width: 100%; max-width: 460px;">
+
     <!-- Join screen -->
     <div id="screen-join" class="col">
       <div class="brand">
@@ -56,6 +89,15 @@
       <div class="card" style="text-align:center;">
         <div class="player-chip" id="myName">—</div>
         <p class="muted" style="margin-top:14px;">Keep this tab open. The first question will appear here.</p>
+      </div>
+    </div>
+
+    <!-- Waiting between questions (late joiner / mid-game reconnect) -->
+    <div id="screen-waiting" class="col hidden">
+      <div class="waiting-banner">
+        <div style="font-size:2rem;">⏳</div>
+        <h2 id="waitingTitle" style="color:white; margin:10px 0 0;">Hang tight!</h2>
+        <p id="waitingMsg">Next question coming soon…</p>
       </div>
     </div>
 
@@ -102,6 +144,7 @@
         <div id="finalRank" class="muted"></div>
       </div>
     </div>
+
   </div>
 </div>
 
@@ -111,24 +154,91 @@
 <script src="/sounds.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
-const show = (which) => {
-  for (const s of ['join','lobby','answer','result','finished']) {
-    $('screen-' + s).classList.toggle('hidden', s !== which);
-  }
-};
-const toast = (msg) => {
+const SCREENS = ['join','lobby','waiting','answer','result','finished'];
+const show = (which) => SCREENS.forEach(s => $('screen-' + s).classList.toggle('hidden', s !== which));
+const toast = (msg, dur = 2400) => {
   const t = $('toast'); t.textContent = msg; t.classList.remove('hidden');
-  setTimeout(() => t.classList.add('hidden'), 2400);
+  setTimeout(() => t.classList.add('hidden'), dur);
 };
 
-const socket = io();
+// ---------- session storage (survives page reload within the tab) ----------
+function saveSession(pin, token, name) {
+  try { sessionStorage.setItem('kPin', pin); sessionStorage.setItem('kToken', token); sessionStorage.setItem('kName', name); }
+  catch {}
+}
+function loadSession() {
+  try { return { pin: sessionStorage.getItem('kPin'), token: sessionStorage.getItem('kToken'), name: sessionStorage.getItem('kName') }; }
+  catch { return {}; }
+}
+function clearSession() {
+  try { sessionStorage.removeItem('kPin'); sessionStorage.removeItem('kToken'); sessionStorage.removeItem('kName'); }
+  catch {}
+}
+
+// ---------- state ----------
 let myName = '';
+let myToken = null;
+let myPin = null;
 let currentQuestion = null;
 let timerInterval = null;
-let myWords = [];      // word-cloud submissions so far this question
-let wordDone = false;  // whether the player pressed Done
+let myWords = [];
+let wordDone = false;
+let isConnected = false;
 
-// Preserve PIN from URL (?pin=123456) so a QR code can drop you here
+// ---------- socket ----------
+const socket = io({ reconnection: true, reconnectionAttempts: Infinity, reconnectionDelay: 1000, reconnectionDelayMax: 5000 });
+
+socket.on('connect', () => {
+  isConnected = true;
+  $('reconnectOverlay').classList.add('hidden');
+
+  // If we have a saved session, attempt auto-rejoin instead of showing the join form
+  const sess = loadSession();
+  if (sess.token && sess.pin) {
+    myToken = sess.token; myPin = sess.pin; myName = sess.name || '';
+    socket.emit('player:rejoin', { token: myToken, pin: myPin }, (res) => {
+      if (res && res.ok) {
+        myName = res.name;
+        $('myName').textContent = myName;
+        $('lobbyName').textContent = `Hi ${myName}!`;
+        saveSession(myPin, myToken, myName);
+        // The server will send question:start or player:waiting depending on state
+        // If we end up on an empty screen, show lobby as safe default
+        if ($('screen-join').classList.contains('hidden') === false) show('lobby');
+      } else {
+        // Session gone (game ended, server restart) — fall through to join screen
+        clearSession();
+        myToken = null; myPin = null; myName = '';
+        // Pre-fill PIN from URL if available
+        const params = new URLSearchParams(location.search);
+        if (params.get('pin')) $('pinInput').value = params.get('pin');
+        show('join');
+      }
+    });
+  } else {
+    const params = new URLSearchParams(location.search);
+    if (params.get('pin')) $('pinInput').value = params.get('pin');
+  }
+});
+
+socket.on('disconnect', () => {
+  isConnected = false;
+  if (myToken) {
+    // Show reconnecting overlay — don't navigate away
+    $('reconnectMsg').textContent = `Reconnecting as ${myName}…`;
+    $('reconnectOverlay').classList.remove('hidden');
+    clearInterval(timerInterval);
+  }
+});
+
+socket.on('connect_error', () => {
+  if (myToken) {
+    $('reconnectMsg').textContent = 'Connection lost. Retrying…';
+    $('reconnectOverlay').classList.remove('hidden');
+  }
+});
+
+// ---------- join ----------
 const params = new URLSearchParams(location.search);
 if (params.get('pin')) $('pinInput').value = params.get('pin');
 
@@ -139,7 +249,8 @@ $('joinBtn').addEventListener('click', () => {
   if (!pin || !name) return toast('Enter PIN and nickname');
   socket.emit('player:join', { pin, name }, (res) => {
     if (res.error) return toast(res.error);
-    myName = res.name;
+    myName = res.name; myToken = res.token; myPin = pin;
+    saveSession(pin, res.token, res.name);
     $('myName').textContent = myName;
     $('lobbyName').textContent = `Hi ${myName}!`;
     show('lobby');
@@ -148,9 +259,19 @@ $('joinBtn').addEventListener('click', () => {
 });
 $('nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('joinBtn').click(); });
 
-socket.on('question:start', ({ question, index, total }) => {
+// ---------- waiting banner (between questions or after mid-game join) ----------
+socket.on('player:waiting', ({ msg }) => {
+  $('waitingTitle').textContent = 'Hang tight!';
+  $('waitingMsg').textContent = msg || 'Next question coming soon…';
+  show('waiting');
+});
+
+// ---------- question ----------
+socket.on('question:start', ({ question, index, total, timeRemaining, alreadyAnswered }) => {
   Sound.play('questionStart');
   currentQuestion = question;
+  $('reconnectOverlay').classList.add('hidden');
+
   $('questionPrompt').textContent = `Q${index + 1}/${total}`;
   $('answerStatus').textContent = question.type === 'wordcloud' ? 'Add words, then press Done' : 'Tap an answer';
   $('wordcloudInput').classList.add('hidden');
@@ -159,24 +280,28 @@ socket.on('question:start', ({ question, index, total }) => {
   if (question.type === 'wordcloud') {
     $('tileGrid').classList.add('hidden');
     $('wordcloudInput').classList.remove('hidden');
-    $('wordInput').value = '';
-    $('wordInput').disabled = false;
-    $('sendWordBtn').disabled = false;
-    $('wordDoneBtn').disabled = false;
-    $('wordDoneBtn').textContent = 'Done ✓';
-    $('myWordList').innerHTML = '';
-    myWords = [];
-    wordDone = false;
+    // Only reset words if this is a fresh start (not a rejoin mid-question)
+    if (!alreadyAnswered) {
+      $('wordInput').value = ''; $('wordInput').disabled = false;
+      $('sendWordBtn').disabled = false; $('wordDoneBtn').disabled = false;
+      $('wordDoneBtn').textContent = 'Done ✓';
+      $('myWordList').innerHTML = ''; myWords = []; wordDone = false;
+    } else {
+      $('wordInput').disabled = true; $('sendWordBtn').disabled = true;
+      $('wordDoneBtn').disabled = true; $('wordDoneBtn').textContent = 'Submitted ✓';
+      $('answerStatus').textContent = 'Already submitted ✓';
+    }
     updateWordCounter();
-    $('wordInput').focus();
+    if (!alreadyAnswered) $('wordInput').focus();
   } else {
-    renderTiles(question.options);
+    renderTiles(question.options, alreadyAnswered);
   }
+
   show('answer');
-  startTimer(question.time);
+  startTimer(typeof timeRemaining === 'number' ? timeRemaining : question.time);
 });
 
-function renderTiles(options) {
+function renderTiles(options, alreadyAnswered) {
   const grid = $('tileGrid');
   grid.innerHTML = '';
   const letters = ['a','b','c','d'];
@@ -184,18 +309,23 @@ function renderTiles(options) {
     const btn = document.createElement('button');
     btn.className = `tile ${letters[i]}`;
     btn.innerHTML = `<span class="shape"></span><span>${escape(opt.text)}</span>`;
-    btn.addEventListener('click', () => {
-      [...grid.children].forEach(c => c.disabled = true);
-      btn.classList.add('selected');
-      socket.emit('player:answer', { choice: i });
-      $('answerStatus').textContent = 'Answer locked in ✓';
-      Sound.play('click');
-    });
+    if (alreadyAnswered) {
+      btn.disabled = true;
+      $('answerStatus').textContent = 'Already answered ✓';
+    } else {
+      btn.addEventListener('click', () => {
+        [...grid.children].forEach(c => c.disabled = true);
+        btn.classList.add('selected');
+        socket.emit('player:answer', { choice: i });
+        $('answerStatus').textContent = 'Answer locked in ✓';
+        Sound.play('click');
+      });
+    }
     grid.appendChild(btn);
   });
 }
 
-// ----- word cloud submission -----
+// ---------- word cloud ----------
 function updateWordCounter() {
   $('wordCounter').textContent = `${myWords.length} / 20 words submitted`;
 }
@@ -207,31 +337,23 @@ function addMyWord() {
   socket.emit('player:answer', { text: v });
   myWords.push(v);
   const chip = document.createElement('span');
-  chip.className = 'my-word';
-  chip.textContent = v;
+  chip.className = 'my-word'; chip.textContent = v;
   $('myWordList').appendChild(chip);
-  $('wordInput').value = '';
-  $('wordInput').focus();
-  updateWordCounter();
-  Sound.play('click');
+  $('wordInput').value = ''; $('wordInput').focus();
+  updateWordCounter(); Sound.play('click');
 }
 $('sendWordBtn').addEventListener('click', addMyWord);
-$('wordInput').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); addMyWord(); }
-});
+$('wordInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addMyWord(); } });
 $('wordDoneBtn').addEventListener('click', () => {
   if (wordDone) return;
   wordDone = true;
   socket.emit('player:wordDone');
-  $('wordInput').disabled = true;
-  $('sendWordBtn').disabled = true;
-  $('wordDoneBtn').disabled = true;
-  $('wordDoneBtn').textContent = 'Submitted ✓';
-  $('answerStatus').textContent = myWords.length
-    ? `Sent ${myWords.length} word${myWords.length === 1 ? '' : 's'} ✓`
-    : 'Submitted (no words)';
+  $('wordInput').disabled = true; $('sendWordBtn').disabled = true;
+  $('wordDoneBtn').disabled = true; $('wordDoneBtn').textContent = 'Submitted ✓';
+  $('answerStatus').textContent = myWords.length ? `Sent ${myWords.length} word${myWords.length === 1 ? '' : 's'} ✓` : 'Submitted (no words)';
 });
 
+// ---------- timer ----------
 function startTimer(seconds) {
   let remaining = seconds;
   $('playerTimer').textContent = remaining + 's';
@@ -243,6 +365,7 @@ function startTimer(seconds) {
   }, 1000);
 }
 
+// ---------- results ----------
 socket.on('player:result', ({ answered, isCorrect, score, delta, type, isScored }) => {
   clearInterval(timerInterval);
   let big = '⏳', msg = '';
@@ -256,7 +379,6 @@ socket.on('player:result', ({ answered, isCorrect, score, delta, type, isScored 
   }
   $('resultBig').textContent = big;
   $('resultMsg').textContent = msg;
-  // Hide score on unscored questions (polls, word cloud)
   if (isScored) {
     $('resultScore').textContent = `Score: ${score}`;
     $('resultScore').classList.remove('hidden');
@@ -268,30 +390,33 @@ socket.on('player:result', ({ answered, isCorrect, score, delta, type, isScored 
 });
 
 socket.on('player:rank', ({ rank, total, score }) => {
-  // Only show rank on the result screen if the most recent question was scored.
-  // (The host sends rank after every question, but it's only meaningful for scored ones.)
   const isPollOrCloud = currentQuestion && (currentQuestion.type === 'poll' || currentQuestion.type === 'wordcloud');
-  if (isPollOrCloud) {
-    $('resultRank').textContent = '';
-  } else {
-    $('resultRank').textContent = `Rank ${rank} of ${total}`;
-  }
-  // Final-podium values are always shown
+  $('resultRank').textContent = isPollOrCloud ? '' : `Rank ${rank} of ${total}`;
   $('finalRank').textContent = `Final rank: ${rank} of ${total}`;
   $('finalScore').textContent = `Score: ${score}`;
 });
 
-socket.on('game:finished', () => { Sound.play('podium'); show('finished'); });
+socket.on('game:finished', () => {
+  Sound.play('podium');
+  clearSession(); // done — clear so next game is a fresh join
+  show('finished');
+});
 
-// Session reset — host started a fresh game on the same socket. Drop the player back to join.
 socket.on('session:reset', () => {
+  clearSession();
   toast('Host started a new session');
   setTimeout(() => location.reload(), 1200);
 });
 
-socket.on('game:ended', ({ reason }) => {
-  toast(reason || 'Game ended');
-  setTimeout(() => location.reload(), 1500);
+socket.on('game:ended', ({ reason } = {}) => {
+  clearSession();
+  if (reason && reason !== 'New session started') {
+    toast(reason);
+    setTimeout(() => location.reload(), 1500);
+  } else if (!reason) {
+    toast('Game ended');
+    setTimeout(() => location.reload(), 1500);
+  }
 });
 
 function escape(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }

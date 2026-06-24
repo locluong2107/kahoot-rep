@@ -1,18 +1,23 @@
 // SAP Kahoot - real-time team quiz server
 // Run: npm install && npm start
-// Players join from any device on the same network at http://<host-IP>:3000
 
 const express = require('express');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, {
+  cors: { origin: '*' },
+  // Generous timeouts — helps on flaky mobile connections
+  pingTimeout: 30000,
+  pingInterval: 10000,
+});
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'quizzes.json');
@@ -47,9 +52,7 @@ app.get('/qr', async (req, res) => {
   if (!target) return res.status(400).send('missing url');
   try {
     const svg = await QRCode.toString(target, {
-      type: 'svg',
-      errorCorrectionLevel: 'M',
-      margin: 1,
+      type: 'svg', errorCorrectionLevel: 'M', margin: 1,
       color: { dark: '#00144A', light: '#FFFFFF' },
     });
     res.setHeader('Content-Type', 'image/svg+xml');
@@ -86,20 +89,34 @@ app.delete('/api/quizzes/:id', (req, res) => {
 /**
  * games: pin -> {
  *   pin, hostId, quizId, quiz, state, currentIndex,
- *   players: { socketId -> { name, score, lastAnswer, lastDelta, streak } },
- *   // For quiz/truefalse/poll: answers.get(sid) = { choice, time }
- *   // For wordcloud:           answers.get(sid) = { words: [], done: boolean }
- *   answers, questionStartAt, timerHandle
+ *
+ *   players: { token -> { name, score, lastAnswer, lastDelta, streak,
+ *                         socketId (current, null when offline) } }
+ *
+ *   rejoinMap: { token -> playerRecord }   // same objects as players values
+ *   tokenBySocket: { socketId -> token }   // reverse lookup
+ *
+ *   answers: Map<token, { choice?, time?, words?, done? }>
+ *   questionStartAt, timerHandle
  * }
  */
 const games = {};
 
 function newPin() {
   let pin;
-  do {
-    pin = String(Math.floor(100000 + Math.random() * 900000));
-  } while (games[pin]);
+  do { pin = String(Math.floor(100000 + Math.random() * 900000)); }
+  while (games[pin]);
   return pin;
+}
+
+function newToken() { return crypto.randomBytes(16).toString('hex'); }
+
+// Active player count (connected OR not — all who joined)
+function activePlayers(game) { return Object.values(game.players); }
+
+// How many sockets are currently online for this game
+function onlineCount(game) {
+  return Object.values(game.players).filter(p => p.socketId).length;
 }
 
 function gameSnapshot(game) {
@@ -109,66 +126,56 @@ function gameSnapshot(game) {
     quizTitle: game.quiz.title,
     currentIndex: game.currentIndex,
     totalQuestions: game.quiz.questions.length,
-    players: Object.values(game.players).map(p => ({ name: p.name, score: p.score })),
+    players: activePlayers(game).map(p => ({ name: p.name, score: p.score })),
   };
 }
 
 function publicQuestion(q) {
   const base = { type: q.type, text: q.text, time: q.time || 20 };
-  if (q.type === 'quiz')      base.options = q.options.map(o => ({ text: o.text }));
+  if (q.type === 'quiz')           base.options = q.options.map(o => ({ text: o.text }));
   else if (q.type === 'truefalse') base.options = [{ text: 'True' }, { text: 'False' }];
-  else if (q.type === 'poll') base.options = q.options.map(o => ({ text: o.text }));
+  else if (q.type === 'poll')      base.options = q.options.map(o => ({ text: o.text }));
   else if (q.type === 'wordcloud') base.options = [];
   return base;
 }
 
 function clearTimer(game) {
-  if (game.timerHandle) {
-    clearTimeout(game.timerHandle);
-    game.timerHandle = null;
-  }
+  if (game.timerHandle) { clearTimeout(game.timerHandle); game.timerHandle = null; }
 }
 
-// Count how many players have a "final" answer for this question.
-// For wordcloud: only those who pressed Done. For others: anyone who picked.
+// Count finalised answers (by token)
 function countAnswered(game) {
   const q = game.quiz.questions[game.currentIndex];
   let n = 0;
   for (const a of game.answers.values()) {
     if (q.type === 'wordcloud') { if (a.done) n++; }
-    else { n++; }
+    else n++;
   }
   return n;
 }
 
-// Normalize a word so "AI", "ai!", "Ai." all bucket together for the cloud.
 function normalizeWord(raw) {
-  let w = String(raw || '').trim().toLowerCase();
-  w = w.replace(/[\s ]+/g, ' ');
-  w = w.replace(/[.,!?;:"'()\[\]{}]/g, '');
-  // very light stem: trailing 's' (only on words ≥ 4 chars)
+  let w = String(raw || '').trim().toLowerCase()
+    .replace(/[\s ]+/g, ' ')
+    .replace(/[.,!?;:"'()\[\]{}]/g, '');
   if (w.length >= 4 && w.endsWith('s')) w = w.slice(0, -1);
   return w;
 }
 
-// Build a frequency map for the word cloud, preserving the most-common original casing.
 function aggregateWords(game) {
-  const counts = {};
-  const display = {};
-  for (const [sid, a] of game.answers.entries()) {
+  const counts = {}, display = {};
+  for (const a of game.answers.values()) {
     if (!a.words) continue;
     for (const raw of a.words) {
       const key = normalizeWord(raw);
       if (!key) continue;
       counts[key] = (counts[key] || 0) + 1;
-      // keep the original spelling of the first occurrence
       if (!display[key]) display[key] = String(raw).trim();
     }
   }
   return Object.keys(counts).map(k => ({ word: display[k], count: counts[k] }));
 }
 
-// Live tally emitter — broadcasts to the host (and anyone watching) during the question.
 function emitLiveUpdate(game) {
   const q = game.quiz.questions[game.currentIndex];
   if (!q) return;
@@ -180,15 +187,14 @@ function emitLiveUpdate(game) {
       if (typeof a.choice === 'number') tally[a.choice] = (tally[a.choice] || 0) + 1;
     }
     io.to(game.pin).emit('live:tally', {
-      type: q.type,
-      tally,
-      totalPlayers: Object.keys(game.players).length,
+      type: q.type, tally,
+      totalPlayers: activePlayers(game).length,
       answered: countAnswered(game),
     });
   } else if (q.type === 'wordcloud') {
     io.to(game.pin).emit('live:wordcloud', {
       words: aggregateWords(game),
-      totalPlayers: Object.keys(game.players).length,
+      totalPlayers: activePlayers(game).length,
       donePlayers: countAnswered(game),
     });
   }
@@ -197,7 +203,6 @@ function emitLiveUpdate(game) {
 function endQuestion(game) {
   clearTimer(game);
   const q = game.quiz.questions[game.currentIndex];
-  const answers = game.answers;
 
   const tally = {};
   let correctIndex = null;
@@ -213,10 +218,10 @@ function endQuestion(game) {
 
   const maxTime = (q.time || 20) * 1000;
 
-  for (const [sid, a] of answers.entries()) {
-    const player = game.players[sid];
+  for (const [token, a] of game.answers.entries()) {
+    const player = game.players[token];
     if (!player) continue;
-    if (q.type === 'wordcloud') continue; // aggregated below
+    if (q.type === 'wordcloud') continue;
     if (typeof a.choice !== 'number') continue;
     tally[a.choice] = (tally[a.choice] || 0) + 1;
     let delta = 0;
@@ -236,38 +241,32 @@ function endQuestion(game) {
     player.lastDelta = delta;
   }
 
-  // word cloud aggregation
   const words = q.type === 'wordcloud' ? aggregateWords(game) : [];
-
-  // total submissions (for the answered/total display)
   const totalAnswered = countAnswered(game);
-
   game.state = 'reveal';
+
   const result = {
     type: q.type,
     text: q.text,
-    options: q.type === 'wordcloud'
-      ? []
+    options: q.type === 'wordcloud' ? []
       : (q.type === 'truefalse' ? ['True', 'False'] : q.options.map(o => o.text)),
-    tally,
-    correctIndex,
-    words,
+    tally, correctIndex, words,
     totalAnswers: totalAnswered,
-    totalPlayers: Object.keys(game.players).length,
+    totalPlayers: activePlayers(game).length,
     isScored: q.type === 'quiz' || q.type === 'truefalse',
   };
 
   io.to(game.pin).emit('question:reveal', result);
 
-  // per-player personal result
-  for (const sid of Object.keys(game.players)) {
-    const p = game.players[sid];
-    const a = answers.get(sid);
+  const ranked = activePlayers(game).sort((a, b) => b.score - a.score);
+  for (const p of activePlayers(game)) {
+    if (!p.socketId) continue;
+    const a = game.answers.get(p.token);
     const answeredAny = !!a && (
       q.type === 'wordcloud' ? (a.words && a.words.length > 0) : (typeof a.choice === 'number')
     );
     const isCorrect = answeredAny && (q.type === 'quiz' || q.type === 'truefalse') && a.choice === correctIndex;
-    io.to(sid).emit('player:result', {
+    io.to(p.socketId).emit('player:result', {
       answered: answeredAny,
       isCorrect: isCorrect || false,
       score: p.score,
@@ -275,12 +274,9 @@ function endQuestion(game) {
       type: q.type,
       isScored: q.type === 'quiz' || q.type === 'truefalse',
     });
+    const rank = ranked.indexOf(p);
+    io.to(p.socketId).emit('player:rank', { rank: rank + 1, total: ranked.length, score: p.score });
   }
-  // rank — only meaningful for scored content, but harmless to send always
-  const ranked = Object.entries(game.players).sort((a, b) => b[1].score - a[1].score);
-  ranked.forEach(([sid, p], i) => {
-    io.to(sid).emit('player:rank', { rank: i + 1, total: ranked.length, score: p.score });
-  });
 
   io.to(game.pin).emit('state', gameSnapshot(game));
 }
@@ -298,25 +294,38 @@ function startQuestion(game) {
     question: publicQuestion(q),
   });
   io.to(game.pin).emit('state', gameSnapshot(game));
-  emitLiveUpdate(game); // initial zeroes
+  emitLiveUpdate(game);
 
   const ms = (q.time || 20) * 1000;
   game.timerHandle = setTimeout(() => endQuestion(game), ms + 500);
 }
 
-// Reset the game back to lobby for a brand-new session, keeping the host attached.
-function startNewSession(game) {
-  clearTimer(game);
-  game.state = 'lobby';
-  game.currentIndex = -1;
-  game.players = {};
-  game.answers = new Map();
-  io.to(game.pin).emit('session:reset', { pin: game.pin });
-  io.to(game.pin).emit('state', gameSnapshot(game));
+// Check auto-end — only count online players, so a disconnected player doesn't
+// block the question from ever ending.
+function checkAutoEnd(game) {
+  const pin = game.pin;
+  const total = activePlayers(game).length;
+  if (total === 0) return;
+  // Count finalised answers only from players currently online
+  // (disconnected players simply don't have an answer — that's fine)
+  const online = activePlayers(game).filter(p => p.socketId);
+  const answeredOnline = online.filter(p => {
+    const a = game.answers.get(p.token);
+    if (!a) return false;
+    const q = game.quiz.questions[game.currentIndex];
+    return q.type === 'wordcloud' ? a.done : true;
+  }).length;
+  if (online.length > 0 && answeredOnline >= online.length) {
+    setTimeout(() => {
+      if (games[pin] && games[pin].state === 'question') endQuestion(games[pin]);
+    }, 500);
+  }
 }
 
 // ---------- socket.io ----------
 io.on('connection', socket => {
+
+  // HOST creates a game
   socket.on('host:create', ({ quizId }, cb) => {
     const quiz = store.quizzes.find(q => q.id === quizId);
     if (!quiz) return cb && cb({ error: 'quiz not found' });
@@ -324,7 +333,8 @@ io.on('connection', socket => {
     const game = {
       pin, hostId: socket.id, quizId, quiz,
       state: 'lobby', currentIndex: -1,
-      players: {}, answers: new Map(),
+      players: {}, rejoinMap: {}, tokenBySocket: {},
+      answers: new Map(),
     };
     games[pin] = game;
     socket.join(pin);
@@ -334,25 +344,101 @@ io.on('connection', socket => {
     io.to(pin).emit('state', gameSnapshot(game));
   });
 
+  // PLAYER joins for the first time (any game state — allow late joiners)
   socket.on('player:join', ({ pin, name }, cb) => {
     const game = games[pin];
     if (!game) return cb && cb({ error: 'Game not found. Check the PIN.' });
-    if (game.state !== 'lobby') return cb && cb({ error: 'Game already started.' });
+    if (game.state === 'finished') return cb && cb({ error: 'This game has already finished.' });
+
     name = String(name || '').trim().slice(0, 24);
     if (!name) return cb && cb({ error: 'Name required.' });
     if (Object.values(game.players).some(p => p.name.toLowerCase() === name.toLowerCase())) {
       return cb && cb({ error: 'Name already taken.' });
     }
-    game.players[socket.id] = { name, score: 0, streak: 0 };
+
+    const token = newToken();
+    const player = { token, name, score: 0, streak: 0, socketId: socket.id, lastDelta: 0 };
+    game.players[token] = player;
+    game.rejoinMap[token] = player;
+    game.tokenBySocket[socket.id] = token;
+
     socket.join(pin);
     socket.data.role = 'player';
     socket.data.pin = pin;
-    socket.data.name = name;
-    cb && cb({ ok: true, name });
-    io.to(pin).emit('player:joined', { name, count: Object.keys(game.players).length });
+    socket.data.token = token;
+
+    cb && cb({ ok: true, name, token });
+    io.to(pin).emit('player:joined', { name, count: activePlayers(game).length });
     io.to(pin).emit('state', gameSnapshot(game));
+
+    // If the game is mid-question, send the current question immediately so late
+    // joiners can participate (they won't earn points — they missed the timer start).
+    if (game.state === 'question') {
+      const q = game.quiz.questions[game.currentIndex];
+      const elapsed = Date.now() - game.questionStartAt;
+      const remaining = Math.max(0, (q.time || 20) * 1000 - elapsed);
+      socket.emit('question:start', {
+        index: game.currentIndex,
+        total: game.quiz.questions.length,
+        question: publicQuestion(q),
+        timeRemaining: Math.round(remaining / 1000),
+      });
+    } else if (game.state === 'reveal' || game.state === 'leaderboard') {
+      // Let them know to wait
+      socket.emit('player:waiting', { msg: 'You joined between questions. Next question coming soon!' });
+    }
   });
 
+  // PLAYER rejoins with their token after a disconnect
+  socket.on('player:rejoin', ({ token, pin }, cb) => {
+    const game = games[pin];
+    if (!game) return cb && cb({ error: 'Game not found.' });
+    if (game.state === 'finished') return cb && cb({ error: 'This game has already finished.' });
+
+    const player = game.rejoinMap[token];
+    if (!player) return cb && cb({ error: 'Session expired. Please join with a new name.' });
+
+    // Detach old socket if it somehow still exists
+    if (player.socketId && player.socketId !== socket.id) {
+      const oldSocket = io.sockets.sockets.get(player.socketId);
+      if (oldSocket) oldSocket.leave(pin);
+      delete game.tokenBySocket[player.socketId];
+    }
+
+    player.socketId = socket.id;
+    game.tokenBySocket[socket.id] = token;
+
+    socket.join(pin);
+    socket.data.role = 'player';
+    socket.data.pin = pin;
+    socket.data.token = token;
+
+    cb && cb({ ok: true, name: player.name, score: player.score, token });
+    io.to(pin).emit('player:rejoined', { name: player.name, count: onlineCount(game) });
+    io.to(pin).emit('state', gameSnapshot(game));
+
+    // Send the current game state so the player's screen catches up
+    if (game.state === 'question') {
+      const q = game.quiz.questions[game.currentIndex];
+      const elapsed = Date.now() - game.questionStartAt;
+      const remaining = Math.max(0, (q.time || 20) * 1000 - elapsed);
+      const alreadyAnswered = game.answers.has(token);
+      socket.emit('question:start', {
+        index: game.currentIndex,
+        total: game.quiz.questions.length,
+        question: publicQuestion(q),
+        timeRemaining: Math.round(remaining / 1000),
+        alreadyAnswered,
+      });
+    } else if (game.state === 'reveal' || game.state === 'leaderboard') {
+      socket.emit('player:waiting', { msg: 'You\'re back! Waiting for the next question…' });
+    }
+
+    // A rejoining player might complete the answer set — recheck auto-end
+    if (game.state === 'question') checkAutoEnd(game);
+  });
+
+  // HOST next
   socket.on('host:next', () => {
     const pin = socket.data.pin;
     const game = games[pin];
@@ -361,7 +447,7 @@ io.on('connection', socket => {
       game.currentIndex++;
       if (game.currentIndex >= game.quiz.questions.length) {
         game.state = 'finished';
-        const ranked = Object.values(game.players).sort((a, b) => b.score - a.score);
+        const ranked = activePlayers(game).sort((a, b) => b.score - a.score);
         io.to(pin).emit('game:finished', { podium: ranked.slice(0, 10) });
         io.to(pin).emit('state', gameSnapshot(game));
         return;
@@ -375,7 +461,7 @@ io.on('connection', socket => {
     const game = games[pin];
     if (!game || game.hostId !== socket.id) return;
     game.state = 'leaderboard';
-    const ranked = Object.values(game.players).sort((a, b) => b.score - a.score).slice(0, 10);
+    const ranked = activePlayers(game).sort((a, b) => b.score - a.score).slice(0, 10);
     io.to(pin).emit('leaderboard', { players: ranked });
     io.to(pin).emit('state', gameSnapshot(game));
   });
@@ -387,36 +473,20 @@ io.on('connection', socket => {
     if (game.state === 'question') endQuestion(game);
   });
 
-  // Go back to the previous question. Rolls back any score earned on the question
-  // we're leaving so players don't get double-counted when it's re-played.
   socket.on('host:back', () => {
     const pin = socket.data.pin;
     const game = games[pin];
     if (!game || game.hostId !== socket.id) return;
-    // Determine which question to revert. If we're showing reveal/leaderboard
-    // we go back to the *current* one. If mid-question, we go back to the
-    // previous one. In both cases we undo the score of whatever was just played.
     let target;
-    if (game.state === 'reveal' || game.state === 'leaderboard') {
-      target = game.currentIndex;            // re-play the question we just revealed
-    } else if (game.state === 'question') {
-      target = game.currentIndex - 1;        // step back to the prior question
-    } else {
-      return; // lobby / finished — nothing to go back to
-    }
+    if (game.state === 'reveal' || game.state === 'leaderboard') target = game.currentIndex;
+    else if (game.state === 'question') target = game.currentIndex - 1;
+    else return;
     if (target < 0) return;
-
-    // Undo the score delta from the question we're leaving (whichever index was last scored).
-    const leavingIndex = game.currentIndex;
-    if (leavingIndex >= 0 && leavingIndex < game.quiz.questions.length) {
-      for (const p of Object.values(game.players)) {
-        if (typeof p.lastDelta === 'number' && p.lastDelta > 0) {
-          p.score -= p.lastDelta;
-          if (p.score < 0) p.score = 0;
-        }
-        p.lastDelta = 0;
-        p.lastAnswer = null;
+    for (const p of activePlayers(game)) {
+      if (typeof p.lastDelta === 'number' && p.lastDelta > 0) {
+        p.score = Math.max(0, p.score - p.lastDelta);
       }
+      p.lastDelta = 0; p.lastAnswer = null;
     }
     game.currentIndex = target;
     startQuestion(game);
@@ -431,7 +501,6 @@ io.on('connection', socket => {
     delete games[pin];
   });
 
-  // Start a brand-new session with a (possibly different) quiz. Same host, fresh PIN.
   socket.on('host:newSession', ({ quizId } = {}, cb) => {
     const oldPin = socket.data.pin;
     const oldGame = games[oldPin];
@@ -446,7 +515,8 @@ io.on('connection', socket => {
     const game = {
       pin, hostId: socket.id, quizId: quiz.id, quiz,
       state: 'lobby', currentIndex: -1,
-      players: {}, answers: new Map(),
+      players: {}, rejoinMap: {}, tokenBySocket: {},
+      answers: new Map(),
     };
     games[pin] = game;
     socket.leave(oldPin);
@@ -461,26 +531,23 @@ io.on('connection', socket => {
     const pin = socket.data.pin;
     const game = games[pin];
     if (!game || game.state !== 'question') return;
-    if (!game.players[socket.id]) return;
+    const token = socket.data.token || game.tokenBySocket[socket.id];
+    if (!token || !game.players[token]) return;
     const q = game.quiz.questions[game.currentIndex];
     const elapsed = Date.now() - game.questionStartAt;
 
     if (q.type === 'wordcloud') {
-      // multi-submit: accumulate words, no auto-end until player presses Done
-      let entry = game.answers.get(socket.id);
-      if (!entry) {
-        entry = { words: [], done: false };
-        game.answers.set(socket.id, entry);
-      }
+      let entry = game.answers.get(token);
+      if (!entry) { entry = { words: [], done: false }; game.answers.set(token, entry); }
       if (entry.done) return;
       const word = String(text || '').trim().slice(0, 40);
       if (!word) return;
-      if (entry.words.length >= 20) return; // soft cap to prevent abuse
+      if (entry.words.length >= 20) return;
       entry.words.push(word);
       socket.emit('player:answered', { ok: true, count: entry.words.length });
     } else {
-      if (game.answers.has(socket.id)) return; // one answer per question
-      game.answers.set(socket.id, {
+      if (game.answers.has(token)) return;
+      game.answers.set(token, {
         choice: typeof choice === 'number' ? choice : null,
         time: elapsed,
       });
@@ -490,55 +557,53 @@ io.on('connection', socket => {
     emitLiveUpdate(game);
     io.to(pin).emit('answers:count', {
       answered: countAnswered(game),
-      total: Object.keys(game.players).length,
+      total: activePlayers(game).length,
     });
-
-    // Auto-end when every player has finalized.
-    if (countAnswered(game) >= Object.keys(game.players).length) {
-      setTimeout(() => {
-        if (games[pin] && games[pin].state === 'question') endQuestion(games[pin]);
-      }, 500);
-    }
+    checkAutoEnd(game);
   });
 
-  // Player presses Done on a word-cloud question
   socket.on('player:wordDone', () => {
     const pin = socket.data.pin;
     const game = games[pin];
     if (!game || game.state !== 'question') return;
-    if (!game.players[socket.id]) return;
+    const token = socket.data.token || game.tokenBySocket[socket.id];
+    if (!token || !game.players[token]) return;
     const q = game.quiz.questions[game.currentIndex];
     if (q.type !== 'wordcloud') return;
-    let entry = game.answers.get(socket.id);
-    if (!entry) {
-      entry = { words: [], done: true };
-      game.answers.set(socket.id, entry);
-    } else {
-      entry.done = true;
-    }
+    let entry = game.answers.get(token);
+    if (!entry) { entry = { words: [], done: true }; game.answers.set(token, entry); }
+    else entry.done = true;
     socket.emit('player:wordDoneAck', { count: entry.words.length });
     emitLiveUpdate(game);
     io.to(pin).emit('answers:count', {
       answered: countAnswered(game),
-      total: Object.keys(game.players).length,
+      total: activePlayers(game).length,
     });
-    if (countAnswered(game) >= Object.keys(game.players).length) {
-      setTimeout(() => {
-        if (games[pin] && games[pin].state === 'question') endQuestion(games[pin]);
-      }, 500);
-    }
+    checkAutoEnd(game);
   });
 
   socket.on('disconnect', () => {
     const pin = socket.data.pin;
     const game = games[pin];
     if (!game) return;
-    if (socket.data.role === 'player' && game.players[socket.id]) {
-      const name = game.players[socket.id].name;
-      delete game.players[socket.id];
-      game.answers.delete(socket.id);
-      io.to(pin).emit('player:left', { name, count: Object.keys(game.players).length });
-      io.to(pin).emit('state', gameSnapshot(game));
+
+    if (socket.data.role === 'player') {
+      const token = socket.data.token || game.tokenBySocket[socket.id];
+      const player = token && game.players[token];
+      if (player && player.socketId === socket.id) {
+        // Mark offline but KEEP them in the game — they can rejoin
+        player.socketId = null;
+        delete game.tokenBySocket[socket.id];
+        io.to(pin).emit('player:offline', {
+          name: player.name,
+          online: onlineCount(game),
+          total: activePlayers(game).length,
+        });
+        io.to(pin).emit('state', gameSnapshot(game));
+
+        // If they were mid-question and everyone else has answered, don't block end
+        if (game.state === 'question') checkAutoEnd(game);
+      }
     } else if (socket.data.role === 'host' && game.hostId === socket.id) {
       io.to(pin).emit('game:ended', { reason: 'Host disconnected' });
       clearTimer(game);
@@ -551,11 +616,9 @@ io.on('connection', socket => {
 function localIPs() {
   const nets = os.networkInterfaces();
   const out = [];
-  for (const name of Object.keys(nets)) {
-    for (const n of nets[name]) {
+  for (const name of Object.keys(nets))
+    for (const n of nets[name])
       if (n.family === 'IPv4' && !n.internal) out.push(n.address);
-    }
-  }
   return out;
 }
 
@@ -572,8 +635,7 @@ server.listen(PORT, '0.0.0.0', () => {
     for (const ip of ips) console.log(`   http://${ip}:${PORT}/`);
   }
   console.log('\n For VIRTUAL meetings (remote players), expose this server publicly:');
-  console.log('   1) Quick option:  npx ngrok http ' + PORT + '   (or: cloudflared tunnel --url http://localhost:' + PORT + ')');
-  console.log('   2) Paste the resulting https URL into the host screen "Public URL" field.');
-  console.log('   The QR code on the host screen will update to that public URL automatically.');
+  console.log('   1) npx ngrok http ' + PORT + '   OR   cloudflared tunnel --url http://localhost:' + PORT);
+  console.log('   2) Paste the https URL into the host screen "Public URL" field.');
   console.log('=================================================\n');
 });
